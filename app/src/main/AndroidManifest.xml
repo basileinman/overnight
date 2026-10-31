@@ -27,6 +27,15 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".GalleryActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".ViewerActivity"
+            android:exported="false" />
+
         <meta-data
             android:name="com.google.mlkit.vision.DEPENDENCIES"
             android:value="segmentation_selfie" />

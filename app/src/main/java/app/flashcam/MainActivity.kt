@@ -5,10 +5,9 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.Color
+import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CaptureRequest
+import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,7 +18,7 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.view.HapticFeedbackConstants
 import android.view.OrientationEventListener
-import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -29,26 +28,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.OptIn
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.Camera2Interop
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
-import androidx.camera.core.Camera
-import androidx.camera.core.CameraInfo
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageCapture
-import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
-import androidx.camera.core.resolutionselector.AspectRatioStrategy
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import android.util.Size
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Collections
@@ -67,52 +49,50 @@ class MainActivity : ComponentActivity() {
         private const val WHITE = 0xE6FFFFFF.toInt()
         private const val BURST_COUNT = 5
         private const val BURST_INTERVAL_MS = 1000L
-        private const val MAX_RAW_EDGE = 2600f
-        private const val TORCH_SETTLE_MS = 300L
+        private const val MAX_RAW_EDGE = 2600
         private const val SCREEN_FLASH_MS = 250L
         private const val MAX_PENDING = 3
     }
 
     private lateinit var root: View
     private lateinit var previewFrame: FrameLayout
-    private lateinit var previewView: PreviewView
+    private lateinit var texture: TextureView
     private lateinit var flashOverlay: View
     private lateinit var counterText: TextView
     private lateinit var statusText: TextView
     private lateinit var modeBtn: TextView
     private lateinit var focusBtn: TextView
+    private lateinit var flashBtn: TextView
     private lateinit var burstBtn: TextView
     private lateinit var blurBtn: TextView
     private lateinit var flipBtn: TextView
     private lateinit var thumb: ImageView
     private lateinit var shutter: View
 
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var imageCapture: ImageCapture? = null
-    private var camera: Camera? = null
-    private var torchFlash = false
-    private val pending = AtomicInteger(0)
-    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var engine: CameraEngine
+    private var cameraReady = false
     private lateinit var processExecutor: ExecutorService
     private val main = Handler(Looper.getMainLooper())
     private val look = Look()
     private val prefs by lazy { getSharedPreferences("flashcam", MODE_PRIVATE) }
+    private val pending = AtomicInteger(0)
 
     private var pmMode = false
-    private var debug = false
-    private var groupMode = false
+    private var far = false
+    private var torchFlash = false
     private var burst = false
     private var drag = false
     private var front = false
+    private var debug = false
     @Volatile private var busy = false
-    private var lastUri: Uri? = null
+    @Volatile private var deviceOrientation = 0
 
     private lateinit var orientationListener: OrientationEventListener
 
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
             if (hasPerms()) {
-                startCamera()
+                openCamera()
             } else {
                 statusText.text = "CAMERA PERMISSION NEEDED"
             }
@@ -121,98 +101,94 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-
-        cameraExecutor = Executors.newSingleThreadExecutor()
         processExecutor = Executors.newSingleThreadExecutor()
 
         root = findViewById(R.id.root)
         previewFrame = findViewById(R.id.previewFrame)
-        previewView = findViewById(R.id.preview)
+        texture = findViewById(R.id.preview)
         flashOverlay = findViewById(R.id.flashOverlay)
         counterText = findViewById(R.id.counter)
         statusText = findViewById(R.id.status)
         modeBtn = findViewById(R.id.modeBtn)
         focusBtn = findViewById(R.id.focusBtn)
+        flashBtn = findViewById(R.id.flashBtn)
         burstBtn = findViewById(R.id.burstBtn)
         blurBtn = findViewById(R.id.blurBtn)
         flipBtn = findViewById(R.id.flipBtn)
         thumb = findViewById(R.id.thumb)
         shutter = findViewById(R.id.shutter)
+        engine = CameraEngine(this, texture)
 
-        // keep controls clear of the status / nav bars (Android 15 forces edge-to-edge)
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(0, bars.top, 0, bars.bottom)
             insets
         }
 
-        // 2:3 viewfinder (35mm frame); the 3:4 camera feed is center-cropped to match
+        // 2:3 viewfinder (35mm frame)
         val screenW = resources.displayMetrics.widthPixels
         previewFrame.layoutParams = (previewFrame.layoutParams as LinearLayout.LayoutParams).apply {
             height = screenW * 3 / 2
         }
-        previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
 
         pmMode = prefs.getBoolean("pm", false)
-        debug = prefs.getBoolean("debug", false)
-        groupMode = prefs.getBoolean("group", false)
+        far = prefs.getBoolean("far", false)
+        torchFlash = prefs.getBoolean("torch", false)
         burst = prefs.getBoolean("burst", false)
         drag = prefs.getBoolean("drag", false)
         front = prefs.getBoolean("front", false)
+        debug = prefs.getBoolean("debug", false)
         refreshUi()
-        refreshRoll()
 
-        previewView.setOnClickListener { shoot() }
+        texture.setOnClickListener { shoot() }
         shutter.setOnClickListener { shoot() }
-        modeBtn.setOnClickListener {
-            if (busy) return@setOnClickListener
-            pmMode = !pmMode; save(); refreshUi(); bindCamera()
-        }
-        focusBtn.setOnClickListener {
-            groupMode = !groupMode; save(); refreshUi(); bindCamera()
-        }
+        modeBtn.setOnClickListener { if (!busy) { pmMode = !pmMode; save(); refreshUi(); reopen() } }
+        focusBtn.setOnClickListener { if (!busy) { far = !far; save(); refreshUi(); reopen() } }
+        flashBtn.setOnClickListener { torchFlash = !torchFlash; save(); refreshUi() }
         burstBtn.setOnClickListener { burst = !burst; save(); refreshUi() }
         blurBtn.setOnClickListener { drag = !drag; save(); refreshUi() }
-        flipBtn.setOnClickListener {
-            if (busy) return@setOnClickListener
-            front = !front; save(); refreshUi(); bindCamera()
-        }
-        thumb.setOnClickListener { openLast() }
+        flipBtn.setOnClickListener { if (!busy) { front = !front; save(); refreshUi(); reopen() } }
+        thumb.setOnClickListener { startActivity(Intent(this, GalleryActivity::class.java)) }
         findViewById<TextView>(R.id.title).setOnLongClickListener {
             debug = !debug; save(); refreshUi()
             toast(if (debug) "Debug on: originals saved to FlashCam/Originals" else "Debug off")
             true
         }
 
+        texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) { openCamera() }
+            override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) { engine.applyTransform() }
+            override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
+            override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+        }
+
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
                 if (orientation == ORIENTATION_UNKNOWN) return
-                val rotation = when (orientation) {
-                    in 45 until 135 -> Surface.ROTATION_270
-                    in 135 until 225 -> Surface.ROTATION_180
-                    in 225 until 315 -> Surface.ROTATION_90
-                    else -> Surface.ROTATION_0
-                }
-                imageCapture?.targetRotation = rotation
+                deviceOrientation = ((orientation + 45) / 90 * 90) % 360
             }
         }
 
-        if (hasPerms()) startCamera() else permLauncher.launch(neededPerms())
+        if (!hasPerms()) permLauncher.launch(neededPerms())
     }
 
-    override fun onStart() {
-        super.onStart()
+    override fun onResume() {
+        super.onResume()
         orientationListener.enable()
+        if (texture.isAvailable) openCamera()
+        loadLastThumb()
     }
 
-    override fun onStop() {
-        super.onStop()
+    override fun onPause() {
+        super.onPause()
         orientationListener.disable()
+        cameraReady = false
+        engine.close()
+        hideScreenFlash()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        cameraExecutor.shutdown()
         processExecutor.shutdown()
     }
 
@@ -229,191 +205,120 @@ class MainActivity : ComponentActivity() {
 
     // ---------- camera ----------
 
-    private fun startCamera() {
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener({
-            cameraProvider = future.get()
-            bindCamera()
-        }, ContextCompat.getMainExecutor(this))
+    private fun openCamera() {
+        if (!hasPerms() || !texture.isAvailable) return
+        cameraReady = false
+        engine.open(
+            CameraEngine.Config(front = front, pm = pmMode, far = far),
+            onReady = { info ->
+                cameraReady = true
+                if (info.isFront != front) { front = info.isFront; refreshUi() }
+            },
+            onError = { msg -> toast(msg) },
+        )
     }
 
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun bindCamera() {
-        val provider = cameraProvider ?: return
+    private fun reopen() {
+        engine.close()
+        openCamera()
+    }
 
-        val wantFacing = if (front) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-        var info: CameraInfo? = provider.availableCameraInfos.firstOrNull { it.lensFacing == wantFacing }
-        if (info == null) {
-            // device lacks that lens; fall back to whatever exists
-            front = !front
-            refreshUi()
-            info = provider.availableCameraInfos.firstOrNull()
-        }
-        if (info == null) {
-            statusText.text = "NO CAMERA"
-            return
-        }
-        val isFront = info.lensFacing == CameraSelector.LENS_FACING_FRONT
-        val selector = CameraSelector.Builder().requireLensFacing(info.lensFacing).build()
-
-        val minFocus = try {
-            Camera2CameraInfo.from(info)
-                .getCameraCharacteristic(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
-        } catch (t: Throwable) { 0f }
-        val hasFlash = info.hasFlashUnit()
-
-        val previewBuilder = Preview.Builder().setResolutionSelector(
-            ResolutionSelector.Builder()
-                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                .build()
-        )
-        val captureBuilder = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-            .setResolutionSelector(
-                ResolutionSelector.Builder()
-                    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
-                    .setResolutionStrategy(
-                        ResolutionStrategy(
-                            Size(3264, 2448),
-                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
-                        )
-                    )
-                    .build()
-            )
-
-        // Film is daylight balanced: flash-lit skin stays natural, room lights and candles stay warm.
-        Camera2Interop.Extender(previewBuilder)
-            .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
-        Camera2Interop.Extender(captureBuilder)
-            .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
-
-        // Fixed focus like a point-and-shoot: ~0.8 m for portrait, ~2.2 m for groups.
-        if (!isFront && minFocus > 0f) {
-            val diopters = min(if (groupMode) 1f / 2.2f else 1f / 0.8f, minFocus)
-            Camera2Interop.Extender(previewBuilder)
-                .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, diopters)
-            Camera2Interop.Extender(captureBuilder)
-                .setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, diopters)
-        }
-
-        val preview = previewBuilder.build()
-        preview.setSurfaceProvider(previewView.surfaceProvider)
-        val capture = captureBuilder.build()
-
-        try {
-            provider.unbindAll()
-            val camera = provider.bindToLifecycle(this, selector, preview, capture)
-            this.camera = camera
-            imageCapture = capture
-            torchFlash = !isFront && hasFlash
-            val exp = camera.cameraInfo.exposureState
-            if (exp.isExposureCompensationSupported) {
-                val step = exp.exposureCompensationStep.toFloat()
-                if (step > 0f) {
-                    val ev = if (pmMode) 0.3f else 0.0f
-                    val idx = Math.round(ev / step)
-                    camera.cameraControl.setExposureCompensationIndex(
-                        idx.coerceIn(exp.exposureCompensationRange.lower, exp.exposureCompensationRange.upper)
-                    )
-                }
-            }
-        } catch (t: Throwable) {
-            imageCapture = null
-            toast("Camera error: ${t.message}")
-        }
+    private fun flashKind(): CameraEngine.Flash = when {
+        engine.isFront -> CameraEngine.Flash.SCREEN
+        pmMode -> CameraEngine.Flash.NONE
+        !engine.hasFlash -> CameraEngine.Flash.NONE
+        torchFlash || !engine.manualSensor -> CameraEngine.Flash.TORCH
+        else -> CameraEngine.Flash.PULSE
     }
 
     // ---------- shooting ----------
 
     private fun shoot() {
-        val ic = imageCapture ?: return
-        if (busy || pending.get() >= MAX_PENDING) return
+        if (!cameraReady || busy || pending.get() >= MAX_PENDING) return
         busy = true
         shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-
         val n = if (burst) BURST_COUNT else 1
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag)
         val stripFrames: MutableList<Bitmap> = Collections.synchronizedList(ArrayList())
-        captureNext(ic, 0, n, stamp, params, stripFrames)
+        captureNext(0, n, stamp, params, stripFrames)
     }
 
-    private fun captureNext(
-        ic: ImageCapture, i: Int, n: Int, stamp: String,
-        params: Look.Params, stripFrames: MutableList<Bitmap>,
-    ) {
+    private fun captureNext(i: Int, n: Int, stamp: String, params: Look.Params, stripFrames: MutableList<Bitmap>) {
         if (n > 1) {
             counterText.visibility = View.VISIBLE
             counterText.text = "${i + 1}/$n"
         }
         val started = SystemClock.elapsedRealtime()
-        val screenFlash = front
-        val torch = torchFlash
-        val cam = camera
+        val kind = flashKind()
+        val rotation = jpegRotation()
+        val mirror = engine.isFront
 
-        val take: () -> Unit = {
-            ic.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    val frame: Bitmap? = try {
-                        uprightScaled(image)
-                    } catch (t: Throwable) {
-                        null
-                    } finally {
-                        image.close()
+        val take = {
+            engine.capture(kind) { bytes ->
+                val frame = bytes?.let { decode(it, rotation, mirror) }
+                main.post {
+                    if (kind == CameraEngine.Flash.SCREEN) hideScreenFlash()
+                    if (frame == null) {
+                        toast("Capture failed")
+                        endShoot(stamp, n, stripFrames)
+                        return@post
                     }
-                    main.post {
-                        if (screenFlash) hideScreenFlash()
-                        if (torch) cam?.cameraControl?.enableTorch(false)
-                        if (frame == null) {
-                            toast("Capture failed")
-                            endShoot(stamp, n, stripFrames)
-                            return@post
-                        }
-                        pending.incrementAndGet()
-                        processExecutor.execute {
-                            try { processAndSave(frame, stamp, i, n, params, stripFrames) } finally { pending.decrementAndGet() }
-                        }
-                        if (i + 1 < n) {
-                            val wait = max(150L, BURST_INTERVAL_MS - (SystemClock.elapsedRealtime() - started))
-                            main.postDelayed({ captureNext(ic, i + 1, n, stamp, params, stripFrames) }, wait)
-                        } else {
-                            endShoot(stamp, n, stripFrames)
-                        }
+                    pending.incrementAndGet()
+                    processExecutor.execute {
+                        try { processAndSave(frame, stamp, i, n, params, stripFrames) } finally { pending.decrementAndGet() }
                     }
-                }
-
-                override fun onError(exception: ImageCaptureException) {
-                    main.post {
-                        if (screenFlash) hideScreenFlash()
-                        if (torch) cam?.cameraControl?.enableTorch(false)
-                        toast("Capture error: ${exception.message}")
+                    if (i + 1 < n) {
+                        val wait = max(150L, BURST_INTERVAL_MS - (SystemClock.elapsedRealtime() - started))
+                        main.postDelayed({ captureNext(i + 1, n, stamp, params, stripFrames) }, wait)
+                    } else {
                         endShoot(stamp, n, stripFrames)
                     }
                 }
-            })
+            }
         }
 
-        if (screenFlash) {
+        if (kind == CameraEngine.Flash.SCREEN) {
             showScreenFlash()
             main.postDelayed({ take() }, SCREEN_FLASH_MS)
-        } else if (torch && cam != null) {
-            cam.cameraControl.enableTorch(true)
-            main.postDelayed({ take() }, TORCH_SETTLE_MS)
         } else {
             take()
         }
     }
 
-    /** Runs after all frames are queued; the processing queue is ordered, so this runs last. */
+    private fun jpegRotation(): Int {
+        val dev = deviceOrientation
+        return if (engine.isFront) (engine.sensorOrientation - dev + 360) % 360
+        else (engine.sensorOrientation + dev) % 360
+    }
+
+    /** Decode the JPEG at a manageable size and turn it upright. */
+    private fun decode(bytes: ByteArray, rotation: Int, mirror: Boolean): Bitmap? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (max(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_RAW_EDGE) sample *= 2
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+        if (bmp == null) null else {
+            val s = min(1f, MAX_RAW_EDGE.toFloat() / max(bmp.width, bmp.height))
+            val m = Matrix()
+            m.postScale(s, s)
+            m.postRotate(rotation.toFloat())
+            if (mirror) m.postScale(-1f, 1f)  // selfies match the viewfinder
+            val out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+            if (out !== bmp) bmp.recycle()
+            out
+        }
+    } catch (t: Throwable) {
+        null
+    }
+
     private fun endShoot(stamp: String, n: Int, stripFrames: MutableList<Bitmap>) {
         counterText.visibility = View.GONE
         busy = false
         if (n <= 1) return
         processExecutor.execute {
-            if (n > 1 && stripFrames.size >= 2) {
+            if (stripFrames.size >= 2) {
                 try {
                     val frames = synchronized(stripFrames) { stripFrames.toList() }
                     val date = SimpleDateFormat("dd.MM.yy", Locale.US).format(Date())
@@ -428,19 +333,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun uprightScaled(image: ImageProxy): Bitmap {
-        val bmp = image.toBitmap()
-        val rot = image.imageInfo.rotationDegrees
-        val s = min(1f, MAX_RAW_EDGE / max(bmp.width, bmp.height))
-        if (rot == 0 && s >= 1f) return bmp
-        val m = Matrix()
-        m.postScale(s, s)
-        m.postRotate(rot.toFloat())
-        val out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
-        if (out !== bmp) bmp.recycle()
-        return out
-    }
-
     private fun processAndSave(
         frame: Bitmap, stamp: String, i: Int, n: Int,
         params: Look.Params, stripFrames: MutableList<Bitmap>,
@@ -453,7 +345,7 @@ class MainActivity : ComponentActivity() {
             val out = look.process(frame, params, System.nanoTime())
             frame.recycle()
             val name = if (n > 1) "FLASH_${stamp}_${i + 1}.jpg" else "FLASH_$stamp.jpg"
-            val uri = saveJpeg(out, name)
+            saveJpeg(out, name)
             if (n > 1) {
                 stripFrames.add(Bitmap.createScaledBitmap(out, 720, max(1, 720 * out.height / out.width), true))
             }
@@ -461,7 +353,6 @@ class MainActivity : ComponentActivity() {
             out.recycle()
             main.post {
                 thumb.setImageBitmap(th)
-                if (uri != null) lastUri = uri
                 bumpRoll()
             }
         } catch (t: Throwable) {
@@ -496,16 +387,11 @@ class MainActivity : ComponentActivity() {
         return uri
     }
 
-    private fun openLast() {
-        val uri = lastUri ?: return
-        try {
-            startActivity(
-                Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, "image/jpeg")
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            )
-        } catch (t: Throwable) {
-            toast("No gallery app found")
+    private fun loadLastThumb() {
+        processExecutor.execute {
+            val last = Roll.load(this).firstOrNull() ?: return@execute
+            val bmp = Roll.thumbnail(this, last, 160)
+            if (bmp != null) main.post { thumb.setImageBitmap(bmp) }
         }
     }
 
@@ -529,22 +415,27 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshUi() {
         modeBtn.text = if (pmMode) "DAY" else "reference"
-        focusBtn.text = if (groupMode) "GROUP" else "PORTRAIT"
+        // reference: fixed focus + flash controls. DAY: autofocus, no flash.
+        focusBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
+        flashBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
+        focusBtn.text = if (far) "FAR" else "CLOSE"
+        flashBtn.text = if (torchFlash) "TORCH" else "PULSE"
         burstBtn.text = if (burst) "×5" else "×1"
         burstBtn.setTextColor(if (burst) ORANGE else WHITE)
         blurBtn.setTextColor(if (drag) ORANGE else WHITE)
         flipBtn.text = if (front) "FRONT" else "BACK"
-        if (::statusText.isInitialized) refreshRoll()
+        refreshRoll()
     }
 
     private fun save() {
         prefs.edit()
             .putBoolean("pm", pmMode)
-            .putBoolean("debug", debug)
-            .putBoolean("group", groupMode)
+            .putBoolean("far", far)
+            .putBoolean("torch", torchFlash)
             .putBoolean("burst", burst)
             .putBoolean("drag", drag)
             .putBoolean("front", front)
+            .putBoolean("debug", debug)
             .apply()
     }
 
@@ -559,7 +450,7 @@ class MainActivity : ComponentActivity() {
         val t = today()
         val count = (if (prefs.getString("rollDate", "") == t) prefs.getInt("rollCount", 0) else 0) + 1
         prefs.edit().putString("rollDate", t).putInt("rollCount", count).apply()
-        statusText.text = "ROLL %02d".format(count)
+        refreshRoll()
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
