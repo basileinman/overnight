@@ -57,8 +57,8 @@ class Look {
                 Mode.AM -> Params(mode = mode, drag = drag, soften = 0.78f)
                 Mode.PM -> Params(
                     mode = mode, drag = drag,
-                    saturation = 0.96f, halation = 0.04f, stars = 0f, grain = 0.040f, vignette = 0.06f,
-                    glow = 0.07f,
+                    saturation = 1.15f, halation = 0.06f, stars = 0f, grain = 0.055f, vignette = 0.12f,
+                    glow = 0f, soften = 0.78f,
                 )
             }
         }
@@ -73,10 +73,11 @@ class Look {
         FloatArray(256) { FIT_B[it] / 1000f },
     )
     private val lutPm = buildLut(
-        contrast = 0.12f,
-        black = floatArrayOf(0.095f, 0.115f, 0.125f),
-        white = floatArrayOf(0.955f, 0.950f, 0.905f),
-        gamma = floatArrayOf(1.03f, 0.99f, 0.97f),
+        // DAY: tuned against 7 matched DAY pairs: deep blacks, punchy contrast, yellow-green greys
+        contrast = 0.95f,
+        black = floatArrayOf(0.018f, 0.022f, 0.022f),
+        white = floatArrayOf(0.985f, 0.985f, 0.940f),
+        gamma = floatArrayOf(1.04f, 0.98f, 1.025f),
     )
 
     private fun buildLut(contrast: Float, black: FloatArray, white: FloatArray, gamma: FloatArray): Lut {

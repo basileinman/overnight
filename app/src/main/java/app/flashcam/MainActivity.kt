@@ -92,7 +92,7 @@ class MainActivity : ComponentActivity() {
     private var front = false
     private var debug = false
     private var evAm = 0f
-    private var evPm = 0.3f
+    private var evPm = 0.1f
     @Volatile private var busy = false
     @Volatile private var deviceOrientation = 0
 
@@ -153,7 +153,7 @@ class MainActivity : ComponentActivity() {
         front = prefs.getBoolean("front", false)
         debug = prefs.getBoolean("debug", false)
         evAm = prefs.getFloat("evAm", 0f)
-        evPm = prefs.getFloat("evPm", 0.3f)
+        evPm = prefs.getFloat("evPm2", 0.1f)
         refreshUi()
 
         setupViewfinderTouch()
@@ -542,7 +542,7 @@ class MainActivity : ComponentActivity() {
             .putBoolean("front", front)
             .putBoolean("debug", debug)
             .putFloat("evAm", evAm)
-            .putFloat("evPm", evPm)
+            .putFloat("evPm2", evPm)
             .apply()
     }
 
