@@ -41,7 +41,7 @@
                 android:id="@+id/modeBtn"
                 style="@style/TopLabel"
                 android:layout_gravity="end|center_vertical"
-                android:text="reference" />
+                android:text="NIGHT" />
         </FrameLayout>
 
         <!-- 2:3 viewfinder, height set in code -->
@@ -83,7 +83,7 @@
                     android:layout_height="wrap_content"
                     android:fontFamily="monospace"
                     android:letterSpacing="0.15"
-                    android:text="reference EXP"
+                    android:text="NIGHT EXP"
                     android:textColor="#99FFFFFF"
                     android:textSize="10sp" />
 

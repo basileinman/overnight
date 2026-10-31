@@ -147,7 +147,7 @@ class MainActivity : ComponentActivity() {
 
         pmMode = prefs.getBoolean("pm", false)
         far = prefs.getBoolean("far", false)
-        torchFlash = prefs.getBoolean("torch", false)
+        torchFlash = false  // always launch with PULSE
         burst = prefs.getBoolean("burst", false)
         drag = prefs.getBoolean("drag", false)
         front = prefs.getBoolean("front", false)
@@ -431,7 +431,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshUi() {
         val grey = 0x80FFFFFF.toInt()
         // reference: fixed focus + flash controls. DAY: autofocus, no flash.
-        modeBtn.text = if (pmMode) "DAY" else "reference"
+        modeBtn.text = if (pmMode) "DAY" else "NIGHT"
         val modeColor = if (pmMode) WHITE else ORANGE
         modeBtn.setTextColor(modeColor)
         modeBtn.compoundDrawableTintList = ColorStateList.valueOf(modeColor)
@@ -521,7 +521,7 @@ class MainActivity : ComponentActivity() {
 
     private fun showEv(e: Float) {
         main.removeCallbacks(hideEvRunnable)
-        evTitle.text = if (pmMode) "DAY EXP" else "reference EXP"
+        evTitle.text = if (pmMode) "DAY EXP" else "NIGHT EXP"
         evValue.text = (if (e > 0f) "+" else "") + "%.1f EV".format(e)
         evRuler.ev = e
         evRuler.visibility = View.VISIBLE
@@ -537,7 +537,6 @@ class MainActivity : ComponentActivity() {
         prefs.edit()
             .putBoolean("pm", pmMode)
             .putBoolean("far", far)
-            .putBoolean("torch", torchFlash)
             .putBoolean("burst", burst)
             .putBoolean("drag", drag)
             .putBoolean("front", front)
