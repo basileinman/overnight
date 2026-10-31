@@ -33,6 +33,7 @@ import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -55,6 +56,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.max
 import kotlin.math.min
 
@@ -66,6 +68,9 @@ class MainActivity : ComponentActivity() {
         private const val BURST_COUNT = 5
         private const val BURST_INTERVAL_MS = 1000L
         private const val MAX_RAW_EDGE = 2600f
+        private const val TORCH_SETTLE_MS = 300L
+        private const val SCREEN_FLASH_MS = 250L
+        private const val MAX_PENDING = 3
     }
 
     private lateinit var root: View
@@ -84,6 +89,9 @@ class MainActivity : ComponentActivity() {
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var imageCapture: ImageCapture? = null
+    private var camera: Camera? = null
+    private var torchFlash = false
+    private val pending = AtomicInteger(0)
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var processExecutor: ExecutorService
     private val main = Handler(Looper.getMainLooper())
@@ -91,6 +99,7 @@ class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("flashcam", MODE_PRIVATE) }
 
     private var pmMode = false
+    private var debug = false
     private var groupMode = false
     private var burst = false
     private var drag = false
@@ -145,6 +154,7 @@ class MainActivity : ComponentActivity() {
         previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
 
         pmMode = prefs.getBoolean("pm", false)
+        debug = prefs.getBoolean("debug", false)
         groupMode = prefs.getBoolean("group", false)
         burst = prefs.getBoolean("burst", false)
         drag = prefs.getBoolean("drag", false)
@@ -168,6 +178,11 @@ class MainActivity : ComponentActivity() {
             front = !front; save(); refreshUi(); bindCamera()
         }
         thumb.setOnClickListener { openLast() }
+        findViewById<TextView>(R.id.title).setOnLongClickListener {
+            debug = !debug; save(); refreshUi()
+            toast(if (debug) "Debug on: originals saved to FlashCam/Originals" else "Debug off")
+            true
+        }
 
         orientationListener = object : OrientationEventListener(this) {
             override fun onOrientationChanged(orientation: Int) {
@@ -254,7 +269,7 @@ class MainActivity : ComponentActivity() {
         )
         val captureBuilder = ImageCapture.Builder()
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setFlashMode(if (!isFront && hasFlash) ImageCapture.FLASH_MODE_ON else ImageCapture.FLASH_MODE_OFF)
+            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
             .setResolutionSelector(
                 ResolutionSelector.Builder()
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
@@ -266,6 +281,12 @@ class MainActivity : ComponentActivity() {
                     )
                     .build()
             )
+
+        // Film is daylight balanced: flash-lit skin stays natural, room lights and candles stay warm.
+        Camera2Interop.Extender(previewBuilder)
+            .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
+        Camera2Interop.Extender(captureBuilder)
+            .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_DAYLIGHT)
 
         // Fixed focus like a point-and-shoot: ~0.8 m for portrait, ~2.2 m for groups.
         if (!isFront && minFocus > 0f) {
@@ -285,13 +306,14 @@ class MainActivity : ComponentActivity() {
         try {
             provider.unbindAll()
             val camera = provider.bindToLifecycle(this, selector, preview, capture)
+            this.camera = camera
             imageCapture = capture
-            // Underexpose so the flash lights the subject and the background drops off naturally.
+            torchFlash = !isFront && hasFlash
             val exp = camera.cameraInfo.exposureState
             if (exp.isExposureCompensationSupported) {
                 val step = exp.exposureCompensationStep.toFloat()
                 if (step > 0f) {
-                    val ev = if (pmMode) -0.5f else -1.0f
+                    val ev = if (pmMode) 0.3f else 0.0f
                     val idx = Math.round(ev / step)
                     camera.cameraControl.setExposureCompensationIndex(
                         idx.coerceIn(exp.exposureCompensationRange.lower, exp.exposureCompensationRange.upper)
@@ -308,7 +330,7 @@ class MainActivity : ComponentActivity() {
 
     private fun shoot() {
         val ic = imageCapture ?: return
-        if (busy) return
+        if (busy || pending.get() >= MAX_PENDING) return
         busy = true
         shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
 
@@ -329,6 +351,8 @@ class MainActivity : ComponentActivity() {
         }
         val started = SystemClock.elapsedRealtime()
         val screenFlash = front
+        val torch = torchFlash
+        val cam = camera
 
         val take: () -> Unit = {
             ic.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
@@ -342,12 +366,16 @@ class MainActivity : ComponentActivity() {
                     }
                     main.post {
                         if (screenFlash) hideScreenFlash()
+                        if (torch) cam?.cameraControl?.enableTorch(false)
                         if (frame == null) {
                             toast("Capture failed")
                             endShoot(stamp, n, stripFrames)
                             return@post
                         }
-                        processExecutor.execute { processAndSave(frame, stamp, i, n, params, stripFrames) }
+                        pending.incrementAndGet()
+                        processExecutor.execute {
+                            try { processAndSave(frame, stamp, i, n, params, stripFrames) } finally { pending.decrementAndGet() }
+                        }
                         if (i + 1 < n) {
                             val wait = max(150L, BURST_INTERVAL_MS - (SystemClock.elapsedRealtime() - started))
                             main.postDelayed({ captureNext(ic, i + 1, n, stamp, params, stripFrames) }, wait)
@@ -360,6 +388,7 @@ class MainActivity : ComponentActivity() {
                 override fun onError(exception: ImageCaptureException) {
                     main.post {
                         if (screenFlash) hideScreenFlash()
+                        if (torch) cam?.cameraControl?.enableTorch(false)
                         toast("Capture error: ${exception.message}")
                         endShoot(stamp, n, stripFrames)
                     }
@@ -369,7 +398,10 @@ class MainActivity : ComponentActivity() {
 
         if (screenFlash) {
             showScreenFlash()
-            main.postDelayed({ take() }, 350)
+            main.postDelayed({ take() }, SCREEN_FLASH_MS)
+        } else if (torch && cam != null) {
+            cam.cameraControl.enableTorch(true)
+            main.postDelayed({ take() }, TORCH_SETTLE_MS)
         } else {
             take()
         }
@@ -378,6 +410,8 @@ class MainActivity : ComponentActivity() {
     /** Runs after all frames are queued; the processing queue is ordered, so this runs last. */
     private fun endShoot(stamp: String, n: Int, stripFrames: MutableList<Bitmap>) {
         counterText.visibility = View.GONE
+        busy = false
+        if (n <= 1) return
         processExecutor.execute {
             if (n > 1 && stripFrames.size >= 2) {
                 try {
@@ -391,7 +425,6 @@ class MainActivity : ComponentActivity() {
                     main.post { toast("Strip failed: ${t.message}") }
                 }
             }
-            main.post { busy = false }
         }
     }
 
@@ -413,6 +446,10 @@ class MainActivity : ComponentActivity() {
         params: Look.Params, stripFrames: MutableList<Bitmap>,
     ) {
         try {
+            if (debug) {
+                val tag = if (params.mode == Look.Mode.PM) "PM" else "AM"
+                saveJpeg(frame, "ORIG_${stamp}_${i + 1}_$tag.jpg", "FlashCam/Originals", 97)
+            }
             val out = look.process(frame, params, System.nanoTime())
             frame.recycle()
             val name = if (n > 1) "FLASH_${stamp}_${i + 1}.jpg" else "FLASH_$stamp.jpg"
@@ -434,16 +471,16 @@ class MainActivity : ComponentActivity() {
 
     // ---------- saving ----------
 
-    private fun saveJpeg(bmp: Bitmap, name: String): Uri? {
+    private fun saveJpeg(bmp: Bitmap, name: String, folder: String = "FlashCam", quality: Int = 92): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/FlashCam")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/" + folder)
                 put(MediaStore.Images.Media.IS_PENDING, 1)
             } else {
                 @Suppress("DEPRECATION")
-                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "FlashCam")
+                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), folder)
                 dir.mkdirs()
                 @Suppress("DEPRECATION")
                 put(MediaStore.Images.Media.DATA, File(dir, name).absolutePath)
@@ -451,7 +488,7 @@ class MainActivity : ComponentActivity() {
         }
         val resolver = contentResolver
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
-        resolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        resolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
             resolver.update(uri, done, null, null)
@@ -497,11 +534,13 @@ class MainActivity : ComponentActivity() {
         burstBtn.setTextColor(if (burst) ORANGE else WHITE)
         blurBtn.setTextColor(if (drag) ORANGE else WHITE)
         flipBtn.text = if (front) "FRONT" else "BACK"
+        if (::statusText.isInitialized) refreshRoll()
     }
 
     private fun save() {
         prefs.edit()
             .putBoolean("pm", pmMode)
+            .putBoolean("debug", debug)
             .putBoolean("group", groupMode)
             .putBoolean("burst", burst)
             .putBoolean("drag", drag)
@@ -513,7 +552,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshRoll() {
         val count = if (prefs.getString("rollDate", "") == today()) prefs.getInt("rollCount", 0) else 0
-        statusText.text = "ROLL %02d".format(count)
+        statusText.text = "ROLL %02d".format(count) + if (debug) " · DBG" else ""
     }
 
     private fun bumpRoll() {

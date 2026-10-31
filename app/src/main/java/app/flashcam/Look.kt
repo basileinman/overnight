@@ -38,11 +38,12 @@ class Look {
         val mode: Mode = Mode.AM,
         val drag: Boolean = false,
         val outLongEdge: Int = 2352,
-        val soften: Float = 0.80f,
+        val soften: Float = 0.62f,
         val vignette: Float = 0.12f,
         val saturation: Float = 1.15f,
         val halation: Float = 0.10f,
-        val stars: Float = 0.55f,
+        val stars: Float = 0.45f,
+        val glow: Float = 0.0f,
         val grain: Float = 0.050f,
     ) {
         companion object {
@@ -50,7 +51,8 @@ class Look {
                 Mode.AM -> Params(mode = mode, drag = drag)
                 Mode.PM -> Params(
                     mode = mode, drag = drag,
-                    saturation = 1.08f, halation = 0.06f, stars = 0.35f, grain = 0.038f, vignette = 0.10f,
+                    saturation = 0.96f, halation = 0.04f, stars = 0f, grain = 0.040f, vignette = 0.06f,
+                    glow = 0.07f,
                 )
             }
         }
@@ -59,16 +61,16 @@ class Look {
     private class Lut(val r: FloatArray, val g: FloatArray, val b: FloatArray)
 
     private val lutAm = buildLut(
-        contrast = 0.55f,
-        black = floatArrayOf(0.055f, 0.062f, 0.052f),
-        white = floatArrayOf(0.975f, 0.962f, 0.885f),
-        gamma = floatArrayOf(0.95f, 1.00f, 1.05f),
+        contrast = 0.45f,
+        black = floatArrayOf(0.055f, 0.060f, 0.055f),
+        white = floatArrayOf(0.965f, 0.950f, 0.895f),
+        gamma = floatArrayOf(0.97f, 1.00f, 1.02f),
     )
     private val lutPm = buildLut(
-        contrast = 0.38f,
-        black = floatArrayOf(0.060f, 0.064f, 0.058f),
-        white = floatArrayOf(0.980f, 0.970f, 0.915f),
-        gamma = floatArrayOf(0.97f, 1.00f, 1.03f),
+        contrast = 0.12f,
+        black = floatArrayOf(0.095f, 0.115f, 0.125f),
+        white = floatArrayOf(0.955f, 0.950f, 0.905f),
+        gamma = floatArrayOf(1.03f, 0.99f, 0.97f),
     )
 
     private fun buildLut(contrast: Float, black: FloatArray, white: FloatArray, gamma: FloatArray): Lut {
@@ -157,18 +159,20 @@ class Look {
         // 6. star filter
         if (p.stars > 0f) addStars(rr, gg, bb, rawL, w, h, p.stars)
 
-        // 7. halation from only the hottest spots
+        // 7. halation from only the hottest spots, plus optional soft haze
         val hot = FloatArray(n) { ((rawL[it] - 0.90f) / 0.10f).coerceIn(0f, 1f) }
         val hal = blurField(hot, w, h, max(4, max(w, h) / 60))
+        val haze = if (p.glow > 0f) blurField(rawL, w, h, max(4, max(w, h) / 40)) else null
 
         // 8. grain + pack
         val out = IntArray(n)
         var state = rnd.nextLong() or 1L
         for (i in 0 until n) {
             val hb = hal[i] * p.halation
-            var r = rr[i] + hb
-            var g = gg[i] + hb * 0.55f
-            var b = bb[i] + hb * 0.25f
+            val hz = if (haze != null) haze[i] * p.glow else 0f
+            var r = rr[i] + hb + hz
+            var g = gg[i] + hb * 0.55f + hz
+            var b = bb[i] + hb * 0.25f + hz * 0.95f
 
             state = state xor (state shl 13); state = state xor (state ushr 7); state = state xor (state shl 17)
             val u1 = ((state ushr 40) and 0xFFFF).toFloat() / 65535f
@@ -213,23 +217,31 @@ class Look {
         val sh = (h + f - 1) / f
         // max-pool so tiny lights survive downsampling
         val hi = FloatArray(sw * sh)
+        val avg = FloatArray(sw * sh)
         for (y in 0 until h) {
             val row = (y / f) * sw
             for (x in 0 until w) {
-                val v = ((rawL[y * w + x] - 0.92f) / 0.08f).coerceIn(0f, 1f)
+                val l = rawL[y * w + x]
+                val v = ((l - 0.93f) / 0.07f).coerceIn(0f, 1f)
                 val i = row + x / f
                 if (v > hi[i]) hi[i] = v
+                avg[i] += l / (f * f)
             }
         }
-        // point-ness: bright, but not part of a big bright area (white shirts, walls)
-        val area = blurField(hi, sw, sh, 6)
-        val pt = FloatArray(sw * sh) { (hi[it] - area[it] * 1.6f).coerceIn(0f, 1f) }
+        // a star needs: clipped, tiny (not a bright wall/shirt/tile shine), and dark surroundings
+        val brightArea = blurField(hi, sw, sh, 3)
+        val surround = blurField(avg, sw, sh, 10)
+        val pt = FloatArray(sw * sh) {
+            val dark = (1f - surround[it] / 0.45f).coerceIn(0f, 1f)
+            val tiny = (1f - brightArea[it] / 0.35f).coerceIn(0f, 1f)
+            hi[it] * dark * tiny
+        }
 
         data class P(val x: Int, val y: Int, val v: Float)
         val pts = ArrayList<P>()
         for (y in 2 until sh - 2) for (x in 2 until sw - 2) {
             val v = pt[y * sw + x]
-            if (v < 0.35f) continue
+            if (v < 0.45f) continue
             var isMax = true
             loop@ for (oy in -2..2) for (ox in -2..2) {
                 if ((ox != 0 || oy != 0) && pt[(y + oy) * sw + x + ox] > v) { isMax = false; break@loop }
@@ -241,7 +253,7 @@ class Look {
         val baseLen = 0.045f * max(w, h)
         val angles = floatArrayOf(0.35f, 0.35f + 1.5708f, 0.35f + 0.7854f, 0.35f + 2.3562f)
         val weights = floatArrayOf(1f, 1f, 0.35f, 0.35f)
-        for (pnt in pts.take(150)) {
+        for (pnt in pts.take(80)) {
             val len = baseLen * (0.45f + 0.55f * pnt.v)
             for (a in angles.indices) {
                 val dx = cos(angles[a])
