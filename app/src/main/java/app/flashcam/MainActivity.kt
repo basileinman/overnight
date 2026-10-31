@@ -66,6 +66,7 @@ class MainActivity : ComponentActivity() {
         private const val BURST_COUNT = 5
         private const val BURST_INTERVAL_MS = 1000L
         private const val MAX_RAW_EDGE = 2000f
+        private const val EXPOSURE_EV = -1.0f
     }
 
     private lateinit var root: View
@@ -276,8 +277,19 @@ class MainActivity : ComponentActivity() {
 
         try {
             provider.unbindAll()
-            provider.bindToLifecycle(this, selector, preview, capture)
+            val camera = provider.bindToLifecycle(this, selector, preview, capture)
             imageCapture = capture
+            // Underexpose so the flash lights the subject and the background drops off naturally.
+            val exp = camera.cameraInfo.exposureState
+            if (exp.isExposureCompensationSupported) {
+                val step = exp.exposureCompensationStep.toFloat()
+                if (step > 0f) {
+                    val idx = Math.round(EXPOSURE_EV / step)
+                    camera.cameraControl.setExposureCompensationIndex(
+                        idx.coerceIn(exp.exposureCompensationRange.lower, exp.exposureCompensationRange.upper)
+                    )
+                }
+            }
         } catch (t: Throwable) {
             imageCapture = null
             toast("Camera error: ${t.message}")

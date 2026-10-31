@@ -33,11 +33,11 @@ class Look {
     data class Params(
         val outLongEdge: Int = 1800,
         val soften: Float = 0.62f,       // fraction of size to downsample to before upscaling
-        val bgGain: Float = 0.52f,       // background exposure (flash falloff)
-        val subjectGain: Float = 1.12f,  // subject exposure (flash hit)
+        val edgeGain: Float = 0.86f,     // exposure at frame edges (flash falloff)
+        val centerGain: Float = 1.06f,   // exposure where the flash lands
         val vignette: Float = 0.38f,
         val saturation: Float = 1.14f,
-        val halation: Float = 0.22f,
+        val halation: Float = 0.16f,
         val glow: Float = 0.04f,
         val grain: Float = 0.045f,
         val drag: Boolean = false,
@@ -60,15 +60,15 @@ class Look {
             val x = i / 255f
             // gentle S-curve for contrast
             val s = x * x * (3f - 2f * x)
-            val y = x + (s - x) * 0.40f
+            val y = x + (s - x) * 0.60f
             // warm channel split: red lifted, blue pulled down
             var r = y.pow(0.94f)
             var g = y.pow(0.985f)
             var b = y.pow(1.05f) * 0.97f
             // faded film blacks + creamy (not pure white) whites
-            r = 0.040f + r * (0.985f - 0.040f)
-            g = 0.036f + g * (0.975f - 0.036f)
-            b = 0.042f + b * (0.950f - 0.042f)
+            r = 0.026f + r * (0.990f - 0.026f)
+            g = 0.022f + g * (0.978f - 0.022f)
+            b = 0.028f + b * (0.950f - 0.028f)
             lutR[i] = r
             lutG[i] = g
             lutB[i] = b
@@ -92,15 +92,23 @@ class Look {
         val px = IntArray(w * h)
         base.getPixels(px, 0, w, 0, 0, w, h)
 
-        // 2. subject mask
-        val mask = subjectMask(base, w, h)
+        // 2. subject mask, only used to keep the subject sharp in drag mode
+        val mask = if (p.drag) subjectMask(base, w, h) else null
         base.recycle()
 
         // 3. drag blur
-        if (p.drag) applyDrag(px, w, h, mask, rnd)
+        if (mask != null) applyDrag(px, w, h, mask, rnd)
 
         // 4-6. flash falloff, tone, saturation
         val n = w * h
+        val flash = FloatArray(n)
+        for (y in 0 until h) {
+            val cy = ((y + 0.5f) / h - 0.45f) / 0.45f
+            for (x in 0 until w) {
+                val cx = ((x + 0.5f) / w - 0.5f) / 0.40f
+                flash[y * w + x] = exp(-(cx * cx + cy * cy))
+            }
+        }
         val rr = FloatArray(n)
         val gg = FloatArray(n)
         val bb = FloatArray(n)
@@ -112,8 +120,8 @@ class Look {
                 val cx = (x + 0.5f) / w - 0.5f
                 val d2 = (cx * cx + cy * cy) / 0.5f
                 val vig = 1f - p.vignette * d2 * sqrt(d2)
-                val s = mask[i]
-                val gain = (p.bgGain + (p.subjectGain - p.bgGain) * s) * vig
+                // smooth center-weighted flash falloff; no hard subject edges
+                val gain = (p.edgeGain + (p.centerGain - p.edgeGain) * flash[i]) * vig
 
                 val c = px[i]
                 var r = ((c shr 16) and 255) / 255f * gain
@@ -207,7 +215,7 @@ class Look {
             // nobody detected: gentle center-weighted flash
             FloatArray(w * h) { 0.55f + 0.45f * radial[it] }
         } else {
-            val soft = blurField(seg, w, h, max(2, max(w, h) / 220))
+            val soft = blurField(seg, w, h, max(4, max(w, h) / 70))
             // light spill: background near the center still catches some flash
             FloatArray(w * h) { i ->
                 val s = soft[i].coerceIn(0f, 1f)
