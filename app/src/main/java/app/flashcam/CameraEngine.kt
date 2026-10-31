@@ -32,14 +32,14 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
 
     enum class Flash { PULSE, TORCH, SCREEN, NONE }
 
-    data class Config(val front: Boolean, val pm: Boolean, val far: Boolean)
+    data class Config(val front: Boolean, val pm: Boolean, val far: Boolean, val ev: Float = 0f)
 
     data class Info(val isFront: Boolean, val hasFlash: Boolean, val manualSensor: Boolean)
 
     companion object {
         // Disposable-camera style fixed exposure for flash pulses
         const val PULSE_EXPOSURE_NS = 12_500_000L   // 1/80 s
-        const val PULSE_ISO = 640
+        const val PULSE_ISO = 900
         const val CLOSE_M = 0.91f                   // 3 ft
         const val FAR_M = 1.83f                     // 6 ft
         const val TORCH_SETTLE_MS = 300L
@@ -190,7 +190,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         val range = chars?.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
         val step = chars?.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)?.toFloat() ?: 0f
         if (range != null && step > 0f) {
-            val ev = if (cfg.pm) 0.3f else 0f
+            val ev = cfg.ev
             b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, (ev / step).roundToInt().coerceIn(range.lower, range.upper))
         }
     }
@@ -204,6 +204,13 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
         b.set(CaptureRequest.FLASH_MODE, if (torch) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
         return b.build()
+    }
+
+    /** Change exposure compensation live (DAY preview + pulse ISO for the next shot). */
+    fun setEv(ev: Float) {
+        val cfg = config ?: return
+        config = cfg.copy(ev = ev)
+        handler?.post { if (!torchOn) startPreview() }
     }
 
     private fun startPreview() {
@@ -263,7 +270,9 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         val expRange = chars?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         val isoRange = chars?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val exp = expRange?.let { PULSE_EXPOSURE_NS.coerceIn(it.lower, it.upper) } ?: PULSE_EXPOSURE_NS
-        val iso = isoRange?.let { PULSE_ISO.coerceIn(it.lower, it.upper) } ?: PULSE_ISO
+        // exposure slider scales the pulse ISO: each +1 EV doubles it
+        val wantIso = (PULSE_ISO * Math.pow(2.0, (config?.ev ?: 0f).toDouble())).toInt()
+        val iso = isoRange?.let { wantIso.coerceIn(it.lower, it.upper) } ?: wantIso
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
         b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exp)
         b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)

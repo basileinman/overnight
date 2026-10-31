@@ -16,7 +16,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.MediaStore
+import android.content.res.ColorStateList
 import android.view.HapticFeedbackConstants
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.OrientationEventListener
 import android.view.TextureView
 import android.view.View
@@ -65,9 +68,13 @@ class MainActivity : ComponentActivity() {
     private lateinit var flashBtn: TextView
     private lateinit var burstBtn: TextView
     private lateinit var blurBtn: TextView
-    private lateinit var flipBtn: TextView
+    private lateinit var flipBtn: ImageView
     private lateinit var thumb: ImageView
-    private lateinit var shutter: View
+    private lateinit var focusReadout: TextView
+    private lateinit var evRuler: EvRuler
+    private lateinit var evBox: View
+    private lateinit var evTitle: TextView
+    private lateinit var evValue: TextView
 
     private lateinit var engine: CameraEngine
     private var cameraReady = false
@@ -84,6 +91,8 @@ class MainActivity : ComponentActivity() {
     private var drag = false
     private var front = false
     private var debug = false
+    private var evAm = 0f
+    private var evPm = 0.3f
     @Volatile private var busy = false
     @Volatile private var deviceOrientation = 0
 
@@ -116,7 +125,12 @@ class MainActivity : ComponentActivity() {
         blurBtn = findViewById(R.id.blurBtn)
         flipBtn = findViewById(R.id.flipBtn)
         thumb = findViewById(R.id.thumb)
-        shutter = findViewById(R.id.shutter)
+        focusReadout = findViewById(R.id.focusReadout)
+        evRuler = findViewById(R.id.evRuler)
+        evBox = findViewById(R.id.evBox)
+        evTitle = findViewById(R.id.evTitle)
+        evValue = findViewById(R.id.evValue)
+        thumb.clipToOutline = true
         engine = CameraEngine(this, texture)
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
@@ -126,9 +140,9 @@ class MainActivity : ComponentActivity() {
         }
 
         // 2:3 viewfinder (35mm frame)
-        val screenW = resources.displayMetrics.widthPixels
+        val frameW = resources.displayMetrics.widthPixels - (24 * resources.displayMetrics.density).toInt()
         previewFrame.layoutParams = (previewFrame.layoutParams as LinearLayout.LayoutParams).apply {
-            height = screenW * 3 / 2
+            height = frameW * 3 / 2
         }
 
         pmMode = prefs.getBoolean("pm", false)
@@ -138,10 +152,11 @@ class MainActivity : ComponentActivity() {
         drag = prefs.getBoolean("drag", false)
         front = prefs.getBoolean("front", false)
         debug = prefs.getBoolean("debug", false)
+        evAm = prefs.getFloat("evAm", 0f)
+        evPm = prefs.getFloat("evPm", 0.3f)
         refreshUi()
 
-        texture.setOnClickListener { shoot() }
-        shutter.setOnClickListener { shoot() }
+        setupViewfinderTouch()
         modeBtn.setOnClickListener { if (!busy) { pmMode = !pmMode; save(); refreshUi(); reopen() } }
         focusBtn.setOnClickListener { if (!busy) { far = !far; save(); refreshUi(); reopen() } }
         flashBtn.setOnClickListener { torchFlash = !torchFlash; save(); refreshUi() }
@@ -149,7 +164,7 @@ class MainActivity : ComponentActivity() {
         blurBtn.setOnClickListener { drag = !drag; save(); refreshUi() }
         flipBtn.setOnClickListener { if (!busy) { front = !front; save(); refreshUi(); reopen() } }
         thumb.setOnClickListener { startActivity(Intent(this, GalleryActivity::class.java)) }
-        findViewById<TextView>(R.id.title).setOnLongClickListener {
+        statusText.setOnLongClickListener {
             debug = !debug; save(); refreshUi()
             toast(if (debug) "Debug on: originals saved to FlashCam/Originals" else "Debug off")
             true
@@ -209,7 +224,7 @@ class MainActivity : ComponentActivity() {
         if (!hasPerms() || !texture.isAvailable) return
         cameraReady = false
         engine.open(
-            CameraEngine.Config(front = front, pm = pmMode, far = far),
+            CameraEngine.Config(front = front, pm = pmMode, far = far, ev = currentEv()),
             onReady = { info ->
                 cameraReady = true
                 if (info.isFront != front) { front = info.isFront; refreshUi() }
@@ -236,7 +251,7 @@ class MainActivity : ComponentActivity() {
     private fun shoot() {
         if (!cameraReady || busy || pending.get() >= MAX_PENDING) return
         busy = true
-        shutter.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        texture.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         val n = if (burst) BURST_COUNT else 1
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag)
@@ -414,17 +429,108 @@ class MainActivity : ComponentActivity() {
     // ---------- ui state ----------
 
     private fun refreshUi() {
-        modeBtn.text = if (pmMode) "DAY" else "reference"
+        val grey = 0x80FFFFFF.toInt()
         // reference: fixed focus + flash controls. DAY: autofocus, no flash.
-        focusBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
+        modeBtn.text = if (pmMode) "DAY" else "reference"
+        val modeColor = if (pmMode) WHITE else ORANGE
+        modeBtn.setTextColor(modeColor)
+        modeBtn.compoundDrawableTintList = ColorStateList.valueOf(modeColor)
+
+        val fixedFocus = !pmMode && !front
+        focusBtn.text = if (far) "FAR ˅" else "CLOSE ˅"
+        focusBtn.alpha = if (fixedFocus) 1f else 0.4f
+        focusBtn.isEnabled = fixedFocus
+        focusBtn.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
+        focusReadout.text = when {
+            front -> "SELFIE"
+            pmMode -> "AF"
+            far -> "6ft"
+            else -> "3ft"
+        }
+        focusReadout.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
+
         flashBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
-        focusBtn.text = if (far) "FAR" else "CLOSE"
         flashBtn.text = if (torchFlash) "TORCH" else "PULSE"
+        flashBtn.setTextColor(if (torchFlash) grey else ORANGE)
         burstBtn.text = if (burst) "×5" else "×1"
-        burstBtn.setTextColor(if (burst) ORANGE else WHITE)
-        blurBtn.setTextColor(if (drag) ORANGE else WHITE)
-        flipBtn.text = if (front) "FRONT" else "BACK"
+        burstBtn.setTextColor(if (burst) ORANGE else grey)
+        blurBtn.setTextColor(if (drag) ORANGE else grey)
         refreshRoll()
+    }
+
+    // ---------- viewfinder: tap = shoot, hold + slide = exposure ----------
+
+    private fun currentEv() = if (pmMode) evPm else evAm
+
+    private fun setupViewfinderTouch() {
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        val holdMs = 280L
+        var downY = 0f
+        var downX = 0f
+        var startEv = 0f
+        var moved = false
+        var adjusting = false
+        val beginAdjust = Runnable {
+            adjusting = true
+            startEv = currentEv()
+            texture.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            showEv(startEv)
+        }
+        texture.setOnTouchListener { v, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.x; downY = ev.y; moved = false; adjusting = false
+                    main.postDelayed(beginAdjust, holdMs)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (adjusting) {
+                        // full viewfinder height = 4 EV; slide up to brighten
+                        val delta = (downY - ev.y) / v.height * 4f
+                        val e = (Math.round((startEv + delta) * 10f) / 10f).coerceIn(-2f, 2f)
+                        if (e != currentEv()) {
+                            if (pmMode) evPm = e else evAm = e
+                            showEv(e)
+                            engine.setEv(e)
+                        }
+                    } else if (Math.abs(ev.x - downX) > slop || Math.abs(ev.y - downY) > slop) {
+                        moved = true
+                        main.removeCallbacks(beginAdjust)
+                    }
+                }
+                MotionEvent.ACTION_UP -> {
+                    main.removeCallbacks(beginAdjust)
+                    if (adjusting) {
+                        save()
+                        main.postDelayed(hideEvRunnable, 700)
+                    } else if (!moved) {
+                        shoot()
+                    }
+                    adjusting = false
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    main.removeCallbacks(beginAdjust)
+                    if (adjusting) hideEv()
+                    adjusting = false
+                }
+            }
+            true
+        }
+    }
+
+    private val hideEvRunnable = Runnable { hideEv() }
+
+    private fun showEv(e: Float) {
+        main.removeCallbacks(hideEvRunnable)
+        evTitle.text = if (pmMode) "DAY EXP" else "reference EXP"
+        evValue.text = (if (e > 0f) "+" else "") + "%.1f EV".format(e)
+        evRuler.ev = e
+        evRuler.visibility = View.VISIBLE
+        evBox.visibility = View.VISIBLE
+    }
+
+    private fun hideEv() {
+        evRuler.visibility = View.GONE
+        evBox.visibility = View.GONE
     }
 
     private fun save() {
@@ -436,6 +542,8 @@ class MainActivity : ComponentActivity() {
             .putBoolean("drag", drag)
             .putBoolean("front", front)
             .putBoolean("debug", debug)
+            .putFloat("evAm", evAm)
+            .putFloat("evPm", evPm)
             .apply()
     }
 
