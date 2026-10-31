@@ -11,6 +11,8 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
@@ -38,8 +40,13 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
 
     companion object {
         // Disposable-camera style fixed exposure for flash pulses
+        // Fallback fixed exposure if the viewfinder hasn't metered yet
         const val PULSE_EXPOSURE_NS = 12_500_000L   // 1/80 s
         const val PULSE_ISO = 900
+        // Metered pulse caps: in dim rooms these stop the background from brightening,
+        // so the flash does the work and the background falls dark (the reference look)
+        const val PULSE_MAX_EXPOSURE_NS = 20_000_000L  // 1/50 s
+        const val PULSE_MAX_ISO = 1250
         const val CLOSE_M = 0.91f                   // 3 ft
         const val FAR_M = 1.83f                     // 6 ft
         const val TORCH_SETTLE_MS = 300L
@@ -57,6 +64,19 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     private var config: Config? = null
     private var torchOn = false
     @Volatile private var pending: ((ByteArray?) -> Unit)? = null
+    // latest auto-exposure reading from the live viewfinder
+    @Volatile private var meteredExposure = 0L
+    @Volatile private var meteredIso = 0
+    private val meter = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
+            val e = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
+            val iso = result.get(CaptureResult.SENSOR_SENSITIVITY)
+            if (e != null && iso != null && e > 0 && iso > 0) {
+                meteredExposure = e
+                meteredIso = iso
+            }
+        }
+    }
 
     var sensorOrientation = 90; private set
     var isFront = false; private set
@@ -216,14 +236,14 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     private fun startPreview() {
         val s = session ?: return
         val req = previewRequest(false) ?: return
-        try { s.setRepeatingRequest(req, null, handler) } catch (_: Throwable) {}
+        try { s.setRepeatingRequest(req, meter, handler) } catch (_: Throwable) {}
     }
 
     private fun setTorch(on: Boolean) {
         val s = session ?: return
         val req = previewRequest(on) ?: return
         torchOn = on
-        try { s.setRepeatingRequest(req, null, handler) } catch (_: Throwable) {}
+        try { s.setRepeatingRequest(req, if (on) null else meter, handler) } catch (_: Throwable) {}
     }
 
     // ---------- capture ----------
@@ -269,10 +289,25 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         applyCommon(b)
         val expRange = chars?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         val isoRange = chars?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-        val exp = expRange?.let { PULSE_EXPOSURE_NS.coerceIn(it.lower, it.upper) } ?: PULSE_EXPOSURE_NS
-        // exposure slider scales the pulse ISO: each +1 EV doubles it
-        val wantIso = (PULSE_ISO * Math.pow(2.0, (config?.ev ?: 0f).toDouble())).toInt()
-        val iso = isoRange?.let { wantIso.coerceIn(it.lower, it.upper) } ?: wantIso
+        val minIso = isoRange?.lower ?: 50
+        val mExp = meteredExposure
+        val mIso = meteredIso
+        var exp: Long
+        var iso: Int
+        if (mExp > 0 && mIso > 0) {
+            // Use the viewfinder's own meter reading (it already includes the exposure slider),
+            // capped so dim rooms stay dark and the flash lights the subject.
+            val target = mExp.toDouble() * mIso
+            exp = min(mExp, PULSE_MAX_EXPOSURE_NS)
+            iso = (target / exp).roundToInt().coerceIn(minIso, PULSE_MAX_ISO)
+            // very bright scenes: drop shutter time instead of going below base ISO
+            if (iso == minIso && target / exp < minIso) exp = max(100_000L, (target / minIso).toLong())
+        } else {
+            exp = PULSE_EXPOSURE_NS
+            iso = (PULSE_ISO * Math.pow(2.0, (config?.ev ?: 0f).toDouble())).toInt()
+        }
+        expRange?.let { exp = exp.coerceIn(it.lower, it.upper) }
+        isoRange?.let { iso = iso.coerceIn(it.lower, it.upper) }
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
         b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exp)
         b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
