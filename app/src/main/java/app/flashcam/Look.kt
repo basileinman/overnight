@@ -5,6 +5,7 @@ import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.max
@@ -16,32 +17,72 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * The "direct flash at reference" look.
+ * Film flash look, calibrated against reference cam reference shots.
  *
- * Pipeline:
- *  1. downscale + soften (cheap-digicam softness)
- *  2. subject mask (ML Kit person segmentation, stands in for LiDAR depth)
- *  3. optional drag blur: background streaks, subject stays sharp (rear-curtain flash)
- *  4. flash falloff: subject pushed hot, background pulled down, vignette
- *  5. film tone curve: warm highlights, lifted/faded blacks, cream whites
- *  6. saturation (rolls off in blown highlights)
- *  7. halation + soft glow around hot spots
- *  8. grain
+ *  1. crop to 2:3 (35mm frame) and resize
+ *  2. slight soften to kill phone over-sharpening
+ *  3. optional drag blur (background streaks, subject sharp)
+ *  4. film tone curve: green-tinged ~6% blacks, warm mids, cream highlights
+ *  5. saturation (rolls off in highlights)
+ *  6. star filter on small point lights
+ *  7. faint halation on the brightest spots
+ *  8. fine grain
+ *
+ * Real flash falloff comes from the camera underexposing, not from this code.
  */
 class Look {
 
+    enum class Mode { AM, PM }
+
     data class Params(
-        val outLongEdge: Int = 1800,
-        val soften: Float = 0.62f,       // fraction of size to downsample to before upscaling
-        val edgeGain: Float = 0.86f,     // exposure at frame edges (flash falloff)
-        val centerGain: Float = 1.06f,   // exposure where the flash lands
-        val vignette: Float = 0.38f,
-        val saturation: Float = 1.14f,
-        val halation: Float = 0.16f,
-        val glow: Float = 0.04f,
-        val grain: Float = 0.045f,
+        val mode: Mode = Mode.AM,
         val drag: Boolean = false,
+        val outLongEdge: Int = 2352,
+        val soften: Float = 0.80f,
+        val vignette: Float = 0.12f,
+        val saturation: Float = 1.15f,
+        val halation: Float = 0.10f,
+        val stars: Float = 0.55f,
+        val grain: Float = 0.050f,
+    ) {
+        companion object {
+            fun forMode(mode: Mode, drag: Boolean) = when (mode) {
+                Mode.AM -> Params(mode = mode, drag = drag)
+                Mode.PM -> Params(
+                    mode = mode, drag = drag,
+                    saturation = 1.08f, halation = 0.06f, stars = 0.35f, grain = 0.038f, vignette = 0.10f,
+                )
+            }
+        }
+    }
+
+    private class Lut(val r: FloatArray, val g: FloatArray, val b: FloatArray)
+
+    private val lutAm = buildLut(
+        contrast = 0.55f,
+        black = floatArrayOf(0.055f, 0.062f, 0.052f),
+        white = floatArrayOf(0.975f, 0.962f, 0.885f),
+        gamma = floatArrayOf(0.95f, 1.00f, 1.05f),
     )
+    private val lutPm = buildLut(
+        contrast = 0.38f,
+        black = floatArrayOf(0.060f, 0.064f, 0.058f),
+        white = floatArrayOf(0.980f, 0.970f, 0.915f),
+        gamma = floatArrayOf(0.97f, 1.00f, 1.03f),
+    )
+
+    private fun buildLut(contrast: Float, black: FloatArray, white: FloatArray, gamma: FloatArray): Lut {
+        val ch = Array(3) { FloatArray(256) }
+        for (i in 0..255) {
+            val x = i / 255f
+            val s = x * x * (3f - 2f * x)
+            val y = x + (s - x) * contrast
+            for (c in 0..2) {
+                ch[c][i] = black[c] + (white[c] - black[c]) * y.pow(gamma[c])
+            }
+        }
+        return Lut(ch[0], ch[1], ch[2])
+    }
 
     private val segmenter by lazy {
         Segmentation.getClient(
@@ -51,68 +92,41 @@ class Look {
         )
     }
 
-    private val lutR = FloatArray(256)
-    private val lutG = FloatArray(256)
-    private val lutB = FloatArray(256)
-
-    init {
-        for (i in 0..255) {
-            val x = i / 255f
-            // gentle S-curve for contrast
-            val s = x * x * (3f - 2f * x)
-            val y = x + (s - x) * 0.60f
-            // warm channel split: red lifted, blue pulled down
-            var r = y.pow(0.94f)
-            var g = y.pow(0.985f)
-            var b = y.pow(1.05f) * 0.97f
-            // faded film blacks + creamy (not pure white) whites
-            r = 0.026f + r * (0.990f - 0.026f)
-            g = 0.022f + g * (0.978f - 0.022f)
-            b = 0.028f + b * (0.950f - 0.028f)
-            lutR[i] = r
-            lutG[i] = g
-            lutB[i] = b
-        }
-    }
-
     fun process(input: Bitmap, p: Params, seed: Long): Bitmap {
         val rnd = Random(seed)
+        val lut = if (p.mode == Mode.AM) lutAm else lutPm
 
-        // 1. size + soften
-        val long = max(input.width, input.height)
+        // 1. crop to 2:3
+        val cropped = cropTo2x3(input)
+
+        // 2. resize + slight soften
+        val long = max(cropped.width, cropped.height)
         val scale = min(1f, p.outLongEdge.toFloat() / long)
-        val w = max(1, (input.width * scale).roundToInt())
-        val h = max(1, (input.height * scale).roundToInt())
+        val w = max(1, (cropped.width * scale).roundToInt())
+        val h = max(1, (cropped.height * scale).roundToInt())
         val small = Bitmap.createScaledBitmap(
-            input, max(1, (w * p.soften).roundToInt()), max(1, (h * p.soften).roundToInt()), true
+            cropped, max(1, (w * p.soften).roundToInt()), max(1, (h * p.soften).roundToInt()), true
         )
+        if (cropped !== input && cropped !== small) cropped.recycle()
         val base = Bitmap.createScaledBitmap(small, w, h, true)
         if (small !== base) small.recycle()
 
         val px = IntArray(w * h)
         base.getPixels(px, 0, w, 0, 0, w, h)
 
-        // 2. subject mask, only used to keep the subject sharp in drag mode
-        val mask = if (p.drag) subjectMask(base, w, h) else null
+        // 3. drag blur (mask only used here)
+        if (p.drag) {
+            val mask = subjectMask(base, w, h)
+            applyDrag(px, w, h, mask, rnd)
+        }
         base.recycle()
 
-        // 3. drag blur
-        if (mask != null) applyDrag(px, w, h, mask, rnd)
-
-        // 4-6. flash falloff, tone, saturation
+        // 4-5. tone + saturation; keep pre-tone luma for highlight detection
         val n = w * h
-        val flash = FloatArray(n)
-        for (y in 0 until h) {
-            val cy = ((y + 0.5f) / h - 0.45f) / 0.45f
-            for (x in 0 until w) {
-                val cx = ((x + 0.5f) / w - 0.5f) / 0.40f
-                flash[y * w + x] = exp(-(cx * cx + cy * cy))
-            }
-        }
         val rr = FloatArray(n)
         val gg = FloatArray(n)
         val bb = FloatArray(n)
-        val luma = FloatArray(n)
+        val rawL = FloatArray(n)
         for (y in 0 until h) {
             val cy = (y + 0.5f) / h - 0.5f
             for (x in 0 until w) {
@@ -120,55 +134,51 @@ class Look {
                 val cx = (x + 0.5f) / w - 0.5f
                 val d2 = (cx * cx + cy * cy) / 0.5f
                 val vig = 1f - p.vignette * d2 * sqrt(d2)
-                // smooth center-weighted flash falloff; no hard subject edges
-                val gain = (p.edgeGain + (p.centerGain - p.edgeGain) * flash[i]) * vig
 
                 val c = px[i]
-                var r = ((c shr 16) and 255) / 255f * gain
-                var g = ((c shr 8) and 255) / 255f * gain
-                var b = (c and 255) / 255f * gain
-                r = lutR[(r.coerceIn(0f, 1f) * 255f).toInt()]
-                g = lutG[(g.coerceIn(0f, 1f) * 255f).toInt()]
-                b = lutB[(b.coerceIn(0f, 1f) * 255f).toInt()]
+                val ri = (c shr 16) and 255
+                val gi = (c shr 8) and 255
+                val bi = c and 255
+                rawL[i] = (0.299f * ri + 0.587f * gi + 0.114f * bi) / 255f
+
+                var r = lut.r[(ri * vig).toInt().coerceIn(0, 255)]
+                var g = lut.g[(gi * vig).toInt().coerceIn(0, 255)]
+                var b = lut.b[(bi * vig).toInt().coerceIn(0, 255)]
 
                 val l = 0.299f * r + 0.587f * g + 0.114f * b
-                val sat = p.saturation - 0.45f * smooth(0.72f, 1f, l)
+                val sat = p.saturation - 0.35f * smooth(0.75f, 1f, l)
                 r = l + (r - l) * sat
                 g = l + (g - l) * sat
                 b = l + (b - l) * sat
                 rr[i] = r; gg[i] = g; bb[i] = b
-                luma[i] = l
             }
         }
 
-        // 7. halation + glow
-        val bright = FloatArray(n) { ((luma[it] - 0.78f) / 0.22f).coerceIn(0f, 1f) }
-        val f = max(4, max(w, h) / 48)
-        val hal = blurField(bright, w, h, f)
-        val glow = blurField(luma, w, h, f)
+        // 6. star filter
+        if (p.stars > 0f) addStars(rr, gg, bb, rawL, w, h, p.stars)
+
+        // 7. halation from only the hottest spots
+        val hot = FloatArray(n) { ((rawL[it] - 0.90f) / 0.10f).coerceIn(0f, 1f) }
+        val hal = blurField(hot, w, h, max(4, max(w, h) / 60))
 
         // 8. grain + pack
         val out = IntArray(n)
         var state = rnd.nextLong() or 1L
         for (i in 0 until n) {
             val hb = hal[i] * p.halation
-            val gm = glow[i] * p.glow
-            var r = rr[i] + hb + gm
-            var g = gg[i] + hb * 0.45f + gm * 0.9f
-            var b = bb[i] + hb * 0.18f + gm * 0.72f
+            var r = rr[i] + hb
+            var g = gg[i] + hb * 0.55f
+            var b = bb[i] + hb * 0.25f
 
-            // xorshift triangle noise in [-1, 1]
             state = state xor (state shl 13); state = state xor (state ushr 7); state = state xor (state shl 17)
             val u1 = ((state ushr 40) and 0xFFFF).toFloat() / 65535f
             val u2 = ((state ushr 20) and 0xFFFF).toFloat() / 65535f
             val noise = u1 + u2 - 1f
-            val amp = p.grain * (1f - 0.6f * min(1f, kotlin.math.abs(luma[i] - 0.45f) * 2f))
+            val l = 0.299f * r + 0.587f * g + 0.114f * b
+            val amp = p.grain * (1f - 0.65f * min(1f, abs(l - 0.40f) * 1.8f))
             r += noise * amp; g += noise * amp; b += noise * amp
 
-            out[i] = (0xFF shl 24) or
-                (to255(r) shl 16) or
-                (to255(g) shl 8) or
-                to255(b)
+            out[i] = (0xFF shl 24) or (to255(r) shl 16) or (to255(g) shl 8) or to255(b)
         }
 
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -176,10 +186,87 @@ class Look {
         return result
     }
 
-    // ---------- subject mask ----------
+    // ---------- crop ----------
+
+    private fun cropTo2x3(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        val portrait = h >= w
+        val ratio = 1.5f
+        var cw = w
+        var ch = h
+        if (portrait) {
+            if (h.toFloat() / w < ratio) cw = (h / ratio).roundToInt() else ch = (w * ratio).roundToInt()
+        } else {
+            if (w.toFloat() / h < ratio) ch = (w / ratio).roundToInt() else cw = (h * ratio).roundToInt()
+        }
+        cw = cw.coerceIn(1, w); ch = ch.coerceIn(1, h)
+        if (cw == w && ch == h) return src
+        return Bitmap.createBitmap(src, (w - cw) / 2, (h - ch) / 2, cw, ch)
+    }
+
+    // ---------- star filter ----------
+
+    private fun addStars(rr: FloatArray, gg: FloatArray, bb: FloatArray, rawL: FloatArray, w: Int, h: Int, strength: Float) {
+        val f = 4
+        val sw = (w + f - 1) / f
+        val sh = (h + f - 1) / f
+        // max-pool so tiny lights survive downsampling
+        val hi = FloatArray(sw * sh)
+        for (y in 0 until h) {
+            val row = (y / f) * sw
+            for (x in 0 until w) {
+                val v = ((rawL[y * w + x] - 0.92f) / 0.08f).coerceIn(0f, 1f)
+                val i = row + x / f
+                if (v > hi[i]) hi[i] = v
+            }
+        }
+        // point-ness: bright, but not part of a big bright area (white shirts, walls)
+        val area = blurField(hi, sw, sh, 6)
+        val pt = FloatArray(sw * sh) { (hi[it] - area[it] * 1.6f).coerceIn(0f, 1f) }
+
+        data class P(val x: Int, val y: Int, val v: Float)
+        val pts = ArrayList<P>()
+        for (y in 2 until sh - 2) for (x in 2 until sw - 2) {
+            val v = pt[y * sw + x]
+            if (v < 0.35f) continue
+            var isMax = true
+            loop@ for (oy in -2..2) for (ox in -2..2) {
+                if ((ox != 0 || oy != 0) && pt[(y + oy) * sw + x + ox] > v) { isMax = false; break@loop }
+            }
+            if (isMax) pts.add(P(x * f + f / 2, y * f + f / 2, v))
+        }
+        pts.sortByDescending { it.v }
+
+        val baseLen = 0.045f * max(w, h)
+        val angles = floatArrayOf(0.35f, 0.35f + 1.5708f, 0.35f + 0.7854f, 0.35f + 2.3562f)
+        val weights = floatArrayOf(1f, 1f, 0.35f, 0.35f)
+        for (pnt in pts.take(150)) {
+            val len = baseLen * (0.45f + 0.55f * pnt.v)
+            for (a in angles.indices) {
+                val dx = cos(angles[a])
+                val dy = sin(angles[a])
+                for (sign in intArrayOf(-1, 1)) {
+                    var s = 2f
+                    while (s < len) {
+                        val t = s / len
+                        val inten = strength * pnt.v * weights[a] * (1f - t).pow(2.4f)
+                        val x = (pnt.x + sign * dx * s).toInt()
+                        val y = (pnt.y + sign * dy * s).toInt()
+                        if (x in 0 until w && y in 0 until h) {
+                            val i = y * w + x
+                            rr[i] += inten; gg[i] += inten * 0.95f; bb[i] += inten * 0.78f
+                        }
+                        s += 1f
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- subject mask (drag mode only) ----------
 
     private fun subjectMask(bmp: Bitmap, w: Int, h: Int): FloatArray {
-        // radial "where the flash lands" falloff, slightly above center
         val radial = FloatArray(w * h)
         for (y in 0 until h) {
             val cy = ((y + 0.5f) / h - 0.45f) / 0.40f
@@ -212,15 +299,10 @@ class Look {
         if (seg != null) for (v in seg) if (v > 0.5f) coverage++
 
         return if (seg == null || coverage < (w * h) / 100) {
-            // nobody detected: gentle center-weighted flash
-            FloatArray(w * h) { 0.55f + 0.45f * radial[it] }
+            radial
         } else {
             val soft = blurField(seg, w, h, max(4, max(w, h) / 70))
-            // light spill: background near the center still catches some flash
-            FloatArray(w * h) { i ->
-                val s = soft[i].coerceIn(0f, 1f)
-                s + (1f - s) * 0.30f * radial[i]
-            }
+            FloatArray(w * h) { soft[it].coerceIn(0f, 1f) }
         }
     }
 
@@ -245,7 +327,7 @@ class Look {
                 }
                 val i = y * w + x
                 val s = mask[i].coerceIn(0f, 1f)
-                val a = (1f - s) * 0.9f + s * 0.18f   // background streaks, faint ghost on subject
+                val a = (1f - s) * 0.9f + s * 0.18f
                 val c = px[i]
                 val r = mix(((c shr 16) and 255).toFloat(), sr / k.toFloat(), a)
                 val g = mix(((c shr 8) and 255).toFloat(), sg / k.toFloat(), a)

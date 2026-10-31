@@ -65,8 +65,7 @@ class MainActivity : ComponentActivity() {
         private const val WHITE = 0xE6FFFFFF.toInt()
         private const val BURST_COUNT = 5
         private const val BURST_INTERVAL_MS = 1000L
-        private const val MAX_RAW_EDGE = 2000f
-        private const val EXPOSURE_EV = -1.0f
+        private const val MAX_RAW_EDGE = 2600f
     }
 
     private lateinit var root: View
@@ -75,6 +74,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var flashOverlay: View
     private lateinit var counterText: TextView
     private lateinit var statusText: TextView
+    private lateinit var modeBtn: TextView
     private lateinit var focusBtn: TextView
     private lateinit var burstBtn: TextView
     private lateinit var blurBtn: TextView
@@ -90,6 +90,7 @@ class MainActivity : ComponentActivity() {
     private val look = Look()
     private val prefs by lazy { getSharedPreferences("flashcam", MODE_PRIVATE) }
 
+    private var pmMode = false
     private var groupMode = false
     private var burst = false
     private var drag = false
@@ -121,6 +122,7 @@ class MainActivity : ComponentActivity() {
         flashOverlay = findViewById(R.id.flashOverlay)
         counterText = findViewById(R.id.counter)
         statusText = findViewById(R.id.status)
+        modeBtn = findViewById(R.id.modeBtn)
         focusBtn = findViewById(R.id.focusBtn)
         burstBtn = findViewById(R.id.burstBtn)
         blurBtn = findViewById(R.id.blurBtn)
@@ -135,13 +137,14 @@ class MainActivity : ComponentActivity() {
             insets
         }
 
-        // 3:4 viewfinder
+        // 2:3 viewfinder (35mm frame); the 3:4 camera feed is center-cropped to match
         val screenW = resources.displayMetrics.widthPixels
         previewFrame.layoutParams = (previewFrame.layoutParams as LinearLayout.LayoutParams).apply {
-            height = screenW * 4 / 3
+            height = screenW * 3 / 2
         }
         previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
 
+        pmMode = prefs.getBoolean("pm", false)
         groupMode = prefs.getBoolean("group", false)
         burst = prefs.getBoolean("burst", false)
         drag = prefs.getBoolean("drag", false)
@@ -151,6 +154,10 @@ class MainActivity : ComponentActivity() {
 
         previewView.setOnClickListener { shoot() }
         shutter.setOnClickListener { shoot() }
+        modeBtn.setOnClickListener {
+            if (busy) return@setOnClickListener
+            pmMode = !pmMode; save(); refreshUi(); bindCamera()
+        }
         focusBtn.setOnClickListener {
             groupMode = !groupMode; save(); refreshUi(); bindCamera()
         }
@@ -253,7 +260,7 @@ class MainActivity : ComponentActivity() {
                     .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
                     .setResolutionStrategy(
                         ResolutionStrategy(
-                            Size(2016, 1512),
+                            Size(3264, 2448),
                             ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                         )
                     )
@@ -284,7 +291,8 @@ class MainActivity : ComponentActivity() {
             if (exp.isExposureCompensationSupported) {
                 val step = exp.exposureCompensationStep.toFloat()
                 if (step > 0f) {
-                    val idx = Math.round(EXPOSURE_EV / step)
+                    val ev = if (pmMode) -0.5f else -1.0f
+                    val idx = Math.round(ev / step)
                     camera.cameraControl.setExposureCompensationIndex(
                         idx.coerceIn(exp.exposureCompensationRange.lower, exp.exposureCompensationRange.upper)
                     )
@@ -306,7 +314,7 @@ class MainActivity : ComponentActivity() {
 
         val n = if (burst) BURST_COUNT else 1
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val params = Look.Params(drag = drag)
+        val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag)
         val stripFrames: MutableList<Bitmap> = Collections.synchronizedList(ArrayList())
         captureNext(ic, 0, n, stamp, params, stripFrames)
     }
@@ -483,6 +491,7 @@ class MainActivity : ComponentActivity() {
     // ---------- ui state ----------
 
     private fun refreshUi() {
+        modeBtn.text = if (pmMode) "DAY" else "reference"
         focusBtn.text = if (groupMode) "GROUP" else "PORTRAIT"
         burstBtn.text = if (burst) "×5" else "×1"
         burstBtn.setTextColor(if (burst) ORANGE else WHITE)
@@ -492,6 +501,7 @@ class MainActivity : ComponentActivity() {
 
     private fun save() {
         prefs.edit()
+            .putBoolean("pm", pmMode)
             .putBoolean("group", groupMode)
             .putBoolean("burst", burst)
             .putBoolean("drag", drag)
