@@ -104,7 +104,7 @@ object Rolls {
     }
 
     /** Ends the active roll and schedules development for the next 8 AM. */
-    fun sendToLab(c: Context) = synchronized(lock) {
+    fun sendToLab(c: Context): Unit = synchronized(lock) {
         val a = active(c) ?: return
         setActive(c, null)
         if (a.used == 0) { dir(c, a.id).deleteRecursively(); return }
@@ -112,10 +112,11 @@ object Rolls {
         schedule(c)
     }
 
-    fun discardActive(c: Context) = synchronized(lock) {
+    fun discardActive(c: Context): Unit = synchronized(lock) {
         val a = active(c) ?: return
         setActive(c, null)
         dir(c, a.id).deleteRecursively()
+        Unit
     }
 
     /** Called on app open: stale-roll safety net + develop anything that's due. Returns rolls developed now. */
