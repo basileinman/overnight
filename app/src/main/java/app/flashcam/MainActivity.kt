@@ -55,6 +55,7 @@ class MainActivity : ComponentActivity() {
         private const val MAX_RAW_EDGE = 2600
         private const val SCREEN_FLASH_MS = 250L
         private const val MAX_PENDING = 3
+        private const val AUTO_MODE_AFTER_MS = 30 * 60 * 1000L
     }
 
     private lateinit var root: View
@@ -145,7 +146,7 @@ class MainActivity : ComponentActivity() {
             height = frameW * 3 / 2
         }
 
-        pmMode = prefs.getBoolean("pm", false)
+        pmMode = SunClock.isDaytime()  // NIGHT/DAY follows the clock on launch
         far = prefs.getBoolean("far", false)
         torchFlash = false  // always launch with PULSE
         burst = prefs.getBoolean("burst", false)
@@ -189,6 +190,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Back after a while (or first launch): re-pick NIGHT/DAY from the clock.
+        // A manual switch sticks while you keep using the app.
+        val away = System.currentTimeMillis() - prefs.getLong("pausedAt", 0L)
+        if (away > AUTO_MODE_AFTER_MS) {
+            val day = SunClock.isDaytime()
+            if (day != pmMode) { pmMode = day; refreshUi() }
+        }
         orientationListener.enable()
         if (texture.isAvailable) openCamera()
         loadLastThumb()
@@ -196,6 +204,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        prefs.edit().putLong("pausedAt", System.currentTimeMillis()).apply()
         orientationListener.disable()
         cameraReady = false
         engine.close()
