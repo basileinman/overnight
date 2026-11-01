@@ -88,6 +88,11 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     var hasFlash = false; private set
     var manualSensor = false; private set
     private var minFocus = 0f
+    @Volatile var lastExpNs = 0L; private set
+    @Volatile var lastIso = 0; private set
+    var fNumber = 0f; private set
+    var focalMm = 0f; private set
+    var focal35 = 0; private set
     private var previewSize = Size(1440, 1080)
 
     // ---------- lifecycle ----------
@@ -108,6 +113,12 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         sensorOrientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         hasFlash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
         minFocus = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+        fNumber = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull() ?: 0f
+        focalMm = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+        focal35 = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.let { sz ->
+            val diag = Math.hypot(sz.width.toDouble(), sz.height.toDouble())
+            if (diag > 0 && focalMm > 0) (focalMm * 43.27 / diag).roundToInt() else 0
+        } ?: 0
         val caps = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
         manualSensor = caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
 
@@ -330,6 +341,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
         b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exp)
         b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+        lastExpNs = exp; lastIso = iso
         b.set(CaptureRequest.SENSOR_FRAME_DURATION, max(exp, 33_333_333L))
         b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
         if (config?.drag == true) {
@@ -343,6 +355,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     private fun autoRequest(cam: CameraDevice, rd: ImageReader, torch: Boolean): CaptureRequest {
         val b = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
         b.addTarget(rd.surface)
+        lastExpNs = meteredExposure; lastIso = meteredIso  // auto exposure: closest reading we have
         applyCommon(b)
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
         b.set(CaptureRequest.FLASH_MODE, if (torch) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)

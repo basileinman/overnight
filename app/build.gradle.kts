@@ -11,8 +11,8 @@ android {
         applicationId = "app.flashcam"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.17"
+        versionCode = 18
+        versionName = "0.18"
     }
 
     signingConfigs {
@@ -52,5 +52,6 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.3")
 
     implementation("androidx.recyclerview:recyclerview:1.3.2")
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
 }

@@ -121,13 +121,13 @@
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingStart="22dp"
-            android:paddingTop="10dp"
-            android:paddingEnd="22dp">
+            android:paddingStart="16dp"
+            android:paddingTop="12dp"
+            android:paddingEnd="18dp">
 
-            <TextView android:id="@+id/flashBtn" style="@style/SmallOpt" android:text="PULSE" />
-            <TextView android:id="@+id/burstBtn" style="@style/SmallOpt" android:text="×1" />
-            <TextView android:id="@+id/blurBtn" style="@style/SmallOpt" android:text="BLUR" />
+            <TextView android:id="@+id/flashBtn" style="@style/Toggle" android:text="PULSE" />
+            <TextView android:id="@+id/burstBtn" style="@style/Toggle" android:text="SINGLE" />
+            <TextView android:id="@+id/blurBtn" style="@style/Toggle" android:text="BLUR" />
 
             <View android:layout_width="0dp" android:layout_height="1dp" android:layout_weight="1" />
 

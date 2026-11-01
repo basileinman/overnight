@@ -153,10 +153,16 @@ class EditActivity : ComponentActivity() {
                 val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
                 Canvas(out).drawBitmap(src, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(m) })
                 src.recycle()
+                // re-encode, then carry over the original shot info
+                val orig = try { contentResolver.openInputStream(uri)?.use { it.readBytes() } } catch (_: Throwable) { null }
+                val tmp = java.io.File.createTempFile("edit", ".jpg", cacheDir)
+                tmp.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, 94, it) }
+                if (orig != null) PhotoMeta.copy(orig, tmp)
+                val bytes = tmp.readBytes(); tmp.delete()
                 val wrote = try {
-                    contentResolver.openOutputStream(uri, "wt")?.use { out.compress(Bitmap.CompressFormat.JPEG, 94, it) } == true
+                    contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) } != null
                 } catch (_: Throwable) { false }
-                if (!wrote) saveCopy(out)
+                if (!wrote) saveCopy(bytes)
                 out.recycle()
                 main.post { finish() }
             } catch (t: Throwable) {
@@ -166,7 +172,7 @@ class EditActivity : ComponentActivity() {
     }
 
     /** Fallback when the original can't be overwritten: save the edit as a new frame. */
-    private fun saveCopy(bmp: Bitmap) {
+    private fun saveCopy(bytes: ByteArray) {
         val name = "FLASH_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + "_edit.jpg"
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
@@ -174,7 +180,7 @@ class EditActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/FlashCam")
         }
         val u = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return
-        contentResolver.openOutputStream(u)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 94, it) }
+        contentResolver.openOutputStream(u)?.use { it.write(bytes) }
     }
 
     private fun label(text: String, color: Int, sp: Float) = TextView(this).apply {

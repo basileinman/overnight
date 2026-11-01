@@ -35,6 +35,9 @@ class ViewerActivity : ComponentActivity() {
     private lateinit var numText: TextView
     private lateinit var heart: TextView
     private lateinit var loopBtn: TextView
+    private lateinit var infoBtn: TextView
+    private lateinit var infoPanel: LinearLayout
+    private var showInfo = false
     private val adapter = PageAdapter()
 
     private var looping = false
@@ -75,8 +78,16 @@ class ViewerActivity : ComponentActivity() {
         }
         val close = label("CLOSE", ORANGE).apply { setOnClickListener { finish() } }
         numText = label("", 0x99FFFFFF.toInt()).apply { gravity = Gravity.CENTER }
+        showInfo = getSharedPreferences("flashcam", MODE_PRIVATE).getBoolean("showInfo", false)
+        infoBtn = label("INFO", Color.WHITE).apply {
+            setPadding(0, 0, dp(22), 0)
+            setOnClickListener {
+                showInfo = !showInfo
+                getSharedPreferences("flashcam", MODE_PRIVATE).edit().putBoolean("showInfo", showInfo).apply()
+                updateBars()
+            }
+        }
         val edit = label("EDIT", Color.WHITE).apply {
-            gravity = Gravity.END
             setOnClickListener {
                 val p = current() ?: return@setOnClickListener
                 stopLoop()
@@ -85,7 +96,9 @@ class ViewerActivity : ComponentActivity() {
         }
         top.addView(close, LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(numText, LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(edit, LinearLayout.LayoutParams(0, -2, 1f))
+        val right = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.END }
+        right.addView(infoBtn); right.addView(edit)
+        top.addView(right, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
 
         // bottom: SHARE   ♥   DELETE   (+ LOOP for bursts)
@@ -122,6 +135,13 @@ class ViewerActivity : ComponentActivity() {
         bottom.addView(share, LinearLayout.LayoutParams(0, -2, 1f))
         bottom.addView(heart, LinearLayout.LayoutParams(0, -2, 1f))
         bottom.addView(del, LinearLayout.LayoutParams(0, -2, 1f))
+        infoPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(16), dp(22), dp(12))
+            background = android.graphics.drawable.GradientDrawable().apply { setColor(0xD90A0A0A.toInt()); cornerRadius = dp(14).toFloat() }
+            visibility = View.GONE
+        }
+        bottomCol.addView(infoPanel, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(14), 0, dp(14), dp(8)) })
         bottomCol.addView(loopBtn)
         bottomCol.addView(bottom, LinearLayout.LayoutParams(-1, -2))
         root.addView(bottomCol, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
@@ -182,6 +202,44 @@ class ViewerActivity : ComponentActivity() {
         heart.setTextColor(if (fav) ORANGE else Color.WHITE)
         loopBtn.visibility = if (p.burstKey != null) View.VISIBLE else View.GONE
         loopBtn.text = if (looping) "■ STOP" else "▶ LOOP"
+        infoBtn.setTextColor(if (showInfo) ORANGE else Color.WHITE)
+        if (showInfo) loadInfo(p) else infoPanel.visibility = View.GONE
+    }
+
+    private fun loadInfo(p: Roll.Photo) {
+        loader.execute {
+            val meta = PhotoMeta.read(this, p.uri)
+            main.post {
+                if (current()?.id != p.id || !showInfo) return@post
+                infoPanel.removeAllViews()
+                val rows = meta?.let { PhotoMeta.rows(it) } ?: emptyList()
+                if (rows.isEmpty()) {
+                    infoPanel.addView(small("NO SHOT INFO · TAKEN BEFORE v0.18", 0x80FFFFFF.toInt()))
+                } else {
+                    // two columns of KEY  value
+                    rows.chunked(2).forEach { pair ->
+                        val line = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(3), 0, dp(3)) }
+                        pair.forEach { (k, v) ->
+                            val cell = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                            cell.addView(small(k, 0x73FFFFFF))
+                            cell.addView(small(v, Color.WHITE).apply { setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f) })
+                            line.addView(cell, LinearLayout.LayoutParams(0, -2, 1f))
+                        }
+                        if (pair.size == 1) line.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+                        infoPanel.addView(line)
+                    }
+                }
+                infoPanel.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    private fun small(text: String, color: Int) = TextView(this).apply {
+        this.text = text
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+        setTextColor(color)
+        typeface = Typeface.MONOSPACE
+        letterSpacing = 0.1f
     }
 
     // ---------- burst loop (flipbook of the 5 frames) ----------

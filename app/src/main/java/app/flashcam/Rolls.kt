@@ -184,8 +184,8 @@ object Rolls {
     }
 
     /** Save a processed frame into the active roll's private folder. */
-    fun saveFrame(c: Context, rollId: String, bmp: Bitmap, name: String) {
-        File(dir(c, rollId), name).outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+    fun saveFrame(c: Context, rollId: String, bmp: Bitmap, name: String, meta: org.json.JSONObject? = null) {
+        File(dir(c, rollId), name).writeBytes(PhotoMeta.encode(c, bmp, 92, meta))
     }
 
     fun next8am(from: Long = System.currentTimeMillis()): Long {

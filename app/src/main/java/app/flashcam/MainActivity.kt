@@ -285,14 +285,16 @@ class MainActivity : ComponentActivity() {
         val n = if (roll != null) Rolls.reserve(this, if (burst) BURST_COUNT else 1) else if (burst) BURST_COUNT else 1
         if (roll != null && n == 0) { busy = false; rollMenu(); return }
         val rollId = roll?.id
+        val rollStart = (roll?.used ?: 0) + 1
+        val rollSize = roll?.size ?: 0
         refreshRoll()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
         val stripFrames: MutableList<Bitmap> = Collections.synchronizedList(ArrayList())
-        captureNext(0, n, stamp, params, stripFrames, rollId)
+        captureNext(0, n, stamp, params, stripFrames, rollId, rollStart, rollSize)
     }
 
-    private fun captureNext(i: Int, n: Int, stamp: String, params: Look.Params, stripFrames: MutableList<Bitmap>, rollId: String?) {
+    private fun captureNext(i: Int, n: Int, stamp: String, params: Look.Params, stripFrames: MutableList<Bitmap>, rollId: String?, rollStart: Int = 0, rollSize: Int = 0) {
         if (n > 1) {
             counterText.visibility = View.VISIBLE
             counterText.text = "${i + 1}/$n"
@@ -305,6 +307,7 @@ class MainActivity : ComponentActivity() {
         val take = {
             engine.capture(kind) { bytes ->
                 val frame = bytes?.let { decode(it, rotation, mirror) }
+                val meta = buildMeta(kind, i, n, rollId, rollStart, rollSize)
                 main.post {
                     if (kind == CameraEngine.Flash.SCREEN) hideScreenFlash()
                     if (frame == null) {
@@ -314,11 +317,11 @@ class MainActivity : ComponentActivity() {
                     }
                     pending.incrementAndGet()
                     processExecutor.execute {
-                        try { processAndSave(frame, stamp, i, n, params, stripFrames, rollId) } finally { pending.decrementAndGet() }
+                        try { processAndSave(frame, stamp, i, n, params, stripFrames, rollId, meta) } finally { pending.decrementAndGet() }
                     }
                     if (i + 1 < n) {
                         val wait = max(150L, BURST_INTERVAL_MS - (SystemClock.elapsedRealtime() - started))
-                        main.postDelayed({ captureNext(i + 1, n, stamp, params, stripFrames, rollId) }, wait)
+                        main.postDelayed({ captureNext(i + 1, n, stamp, params, stripFrames, rollId, rollStart, rollSize) }, wait)
                     } else {
                         endShoot(stamp, n, stripFrames, rollId)
                     }
@@ -391,7 +394,7 @@ class MainActivity : ComponentActivity() {
 
     private fun processAndSave(
         frame: Bitmap, stamp: String, i: Int, n: Int,
-        params: Look.Params, stripFrames: MutableList<Bitmap>, rollId: String?,
+        params: Look.Params, stripFrames: MutableList<Bitmap>, rollId: String?, meta: org.json.JSONObject? = null,
     ) {
         try {
             if (debug) {
@@ -401,7 +404,7 @@ class MainActivity : ComponentActivity() {
             val out = look.process(frame, params, System.nanoTime())
             frame.recycle()
             val name = if (n > 1) "FLASH_${stamp}_${i + 1}.jpg" else "FLASH_$stamp.jpg"
-            if (rollId != null) Rolls.saveFrame(this, rollId, out, name) else saveJpeg(out, name)
+            if (rollId != null) Rolls.saveFrame(this, rollId, out, name, meta) else saveJpeg(out, name, meta = meta)
             if (n > 1) {
                 stripFrames.add(Bitmap.createScaledBitmap(out, 720, max(1, 720 * out.height / out.width), true))
             }
@@ -416,7 +419,7 @@ class MainActivity : ComponentActivity() {
 
     // ---------- saving ----------
 
-    private fun saveJpeg(bmp: Bitmap, name: String, folder: String = "FlashCam", quality: Int = 92): Uri? {
+    private fun saveJpeg(bmp: Bitmap, name: String, folder: String = "FlashCam", quality: Int = 92, meta: org.json.JSONObject? = null): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -433,7 +436,8 @@ class MainActivity : ComponentActivity() {
         }
         val resolver = contentResolver
         val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
-        resolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }
+        val bytes = PhotoMeta.encode(this, bmp, quality, meta)
+        resolver.openOutputStream(uri)?.use { it.write(bytes) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
             resolver.update(uri, done, null, null)
@@ -491,11 +495,20 @@ class MainActivity : ComponentActivity() {
         flashBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
         flashBtn.text = if (torchFlash) "TORCH" else "PULSE"
         flashBtn.setTextColor(if (torchFlash) grey else ORANGE)
-        burstBtn.text = if (burst) "×5" else "×1"
+        burstBtn.text = if (burst) "BURST" else "SINGLE"
         burstBtn.setTextColor(if (burst) ORANGE else grey)
         blurBtn.text = if (realDrag) "DRAG" else "BLUR"
         blurBtn.setTextColor(if (drag || realDrag) ORANGE else grey)
         blurBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
+        val d = resources.displayMetrics.density
+        fun pill(on: Boolean) = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = 18 * d
+            setStroke((1 * d).toInt().coerceAtLeast(1), if (on) ORANGE else 0x40FFFFFF)
+            setColor(if (on) 0x14FF7A1F else 0x00000000)
+        }
+        flashBtn.background = pill(!torchFlash)
+        burstBtn.background = pill(burst)
+        blurBtn.background = pill(drag || realDrag)
         refreshRoll()
     }
 
@@ -585,6 +598,25 @@ class MainActivity : ComponentActivity() {
             .putFloat("evAm", evAm)
             .putFloat("evPm2", evPm)
             .apply()
+    }
+
+    /** Settings captured with each frame; shown in the viewer's INFO panel. */
+    private fun buildMeta(kind: CameraEngine.Flash, i: Int, n: Int, rollId: String?, rollStart: Int, rollSize: Int): org.json.JSONObject {
+        val m = org.json.JSONObject()
+        m.put("v", 1)
+        m.put("time", System.currentTimeMillis())
+        m.put("mode", if (pmMode) "DAY" else "NIGHT")
+        m.put("focus", when { engine.isFront -> "SELFIE"; pmMode -> "AUTO"; far -> "FAR · 6 FT"; else -> "CLOSE · 3 FT" })
+        m.put("flash", kind.name.let { if (it == "NONE") "OFF" else it })
+        m.put("effect", when { realDrag && kind == CameraEngine.Flash.PULSE -> "DRAG"; drag && !pmMode && !engine.isFront -> "BLUR"; else -> "NONE" })
+        m.put("burstOf", n); m.put("burstIdx", i + 1)
+        m.put("ev", currentEv().toDouble())
+        m.put("expNs", engine.lastExpNs); m.put("iso", engine.lastIso)
+        m.put("fNumber", engine.fNumber.toDouble()); m.put("focalMm", engine.focalMm.toDouble()); m.put("focal35", engine.focal35)
+        m.put("camera", if (engine.isFront) "FRONT" else "BACK")
+        m.put("phone", Build.MODEL)
+        if (rollId != null) { m.put("rollFrame", rollStart + i); m.put("rollSize", rollSize) }
+        return m
     }
 
     private fun refreshRoll() {
