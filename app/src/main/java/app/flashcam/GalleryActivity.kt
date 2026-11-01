@@ -45,7 +45,7 @@ class GalleryActivity : ComponentActivity() {
     private var shown: List<Roll.Photo> = emptyList()
 
     private sealed class Item {
-        class Card(val title: String, val sub: String, val frames: Int, val total: Int) : Item()
+        class Card(val title: String, val sub: String, val frames: Int, val total: Int, val rollId: String, val inCamera: Boolean) : Item()
         class Divider(val text: String) : Item()
         class Pic(val index: Int) : Item()
     }
@@ -186,10 +186,10 @@ class GalleryActivity : ComponentActivity() {
         val out = ArrayList<Item>()
         if (!favOnly) {
             Rolls.active(this)?.let { a ->
-                if (a.used > 0) out.add(Item.Card("IN CAMERA", "${a.used} OF ${a.size} SHOT", a.used, a.size))
+                if (a.used > 0) out.add(Item.Card("IN CAMERA", "${a.used} OF ${a.size} SHOT", a.used, a.size, a.id, true))
             }
             Rolls.lab(this).sortedBy { it.ready }.forEach { r ->
-                out.add(Item.Card("DEVELOPING", Rolls.readyLabel(r.ready), r.used, r.size))
+                out.add(Item.Card("DEVELOPING", Rolls.readyLabel(r.ready), r.used, r.size, r.id, false))
             }
         }
         val rollOf = HashMap<String, Rolls.Developed>()
@@ -265,7 +265,33 @@ class GalleryActivity : ComponentActivity() {
         }
     }
 
-    private inner class Holder(val root: View, val img: ImageView?, val num: TextView?, val check: View?, val text: TextView?) :
+    /** Hidden: hold a DEVELOPING card for 5 seconds to develop it immediately. */
+    private fun attachDevelopNow(v: View, card: Item.Card) {
+        if (card.inCamera) { v.setOnTouchListener(null); return }
+        val fire = Runnable {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+            FlashDialog.show(this, "Develop now?", "Skip the wait and develop this roll right away.",
+                listOf(FlashDialog.Option("Develop now", FlashDialog.Style.PRIMARY) {
+                    loader.execute {
+                        val dev = Rolls.developNow(this, card.rollId)
+                        val list = Roll.load(this)
+                        main.post {
+                            all = list; applyFilter()
+                            if (dev.isNotEmpty()) android.widget.Toast.makeText(this, "Your roll is developed", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }))
+        }
+        v.setOnTouchListener { view, e ->
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> { view.parent?.requestDisallowInterceptTouchEvent(true); main.postDelayed(fire, 5000) }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> { view.parent?.requestDisallowInterceptTouchEvent(false); main.removeCallbacks(fire) }
+            }
+            true
+        }
+    }
+
+    private inner class Holder(val root: View, val img: ImageView?, val num: TextView?, val check: View?, val text: TextView?, val action: TextView? = null) :
         RecyclerView.ViewHolder(root)
 
     private inner class Adapter : RecyclerView.Adapter<Holder>() {
@@ -281,8 +307,14 @@ class GalleryActivity : ComponentActivity() {
                     layoutParams = RecyclerView.LayoutParams(-1, -2).apply { setMargins(dp(3), dp(4), dp(3), dp(12)) }
                 }
                 val t = label("", 13f, Color.WHITE)
+                val act = label("SEND TO LAB", 13f, ORANGE).apply {
+                    gravity = Gravity.CENTER
+                    setPadding(0, dp(12), 0, dp(12))
+                    background = GradientDrawable().apply { setColor(0x1FFF7A1F); cornerRadius = dp(8).toFloat(); setStroke(dp(1), 0x66FF7A1F) }
+                }
                 box.addView(t)
-                return Holder(box, null, null, null, t)
+                box.addView(act, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
+                return Holder(box, null, null, null, t, act)
             }
             if (viewType == 2) {
                 val t = label("", 11f, 0x80FFFFFF.toInt()).apply {
@@ -322,6 +354,14 @@ class GalleryActivity : ComponentActivity() {
                         append("   " + it.sub + "\n\n")
                         append(filled + empty, android.text.style.ForegroundColorSpan(0x66FFFFFF), 0)
                     }
+                    val card = it
+                    h.action!!.visibility = if (card.inCamera) View.VISIBLE else View.GONE
+                    h.action.setOnClickListener {
+                        FlashDialog.show(this@GalleryActivity, "Send to lab?",
+                            "The roll is finished and develops at 8:00 AM. No more photos can be added to it.",
+                            listOf(FlashDialog.Option("Send to lab", FlashDialog.Style.PRIMARY) { Rolls.sendToLab(this@GalleryActivity); applyFilter() }))
+                    }
+                    attachDevelopNow(h.root, card)
                 }
                 is Item.Divider -> h.text!!.text = it.text
                 is Item.Pic -> bindPic(h, it.index, position)

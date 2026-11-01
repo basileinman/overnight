@@ -595,23 +595,18 @@ class MainActivity : ComponentActivity() {
 
     // ---------- rolls ----------
 
-    private fun dialog() = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-
     private fun rollMenu() {
         val a = Rolls.active(this)
         if (a == null) {
-            val sizes = intArrayOf(36, 24, 12)
-            dialog().setTitle("Load a roll")
-                .setItems(sizes.map { "$it exposures" }.toTypedArray()) { _, i -> loadRoll(sizes[i]) }
-                .setNegativeButton("Cancel", null)
-                .show()
+            FlashDialog.loadRoll(this) { loadRoll(it) }
         } else {
-            dialog().setTitle("Roll · ${a.used}/${a.size} shot")
-                .setMessage("Photos stay hidden until developed. Send to the lab to finish early: it develops at 8:00 AM.")
-                .setPositiveButton("Send to lab") { _, _ -> confirmSendToLab() }
-                .setNeutralButton("Discard roll") { _, _ -> confirmDiscard() }
-                .setNegativeButton("Keep shooting", null)
-                .show()
+            FlashDialog.show(this, "Roll · ${a.used}/${a.size}",
+                "Photos stay hidden until developed. Send to the lab to finish early and develop at 8:00 AM.",
+                listOf(
+                    FlashDialog.Option("Send to lab", FlashDialog.Style.PRIMARY) { confirmSendToLab() },
+                    FlashDialog.Option("Keep shooting") {},
+                    FlashDialog.Option("Discard roll", FlashDialog.Style.DANGER) { confirmDiscard() },
+                ), cancel = null)
         }
     }
 
@@ -625,33 +620,19 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun confirmSendToLab() {
-        dialog().setTitle("Send to lab?")
-            .setMessage("The roll is finished and develops at 8:00 AM. You can't add more photos to it.")
-            .setPositiveButton("Send") { _, _ -> Rolls.sendToLab(this); refreshRoll(); toast("Developing · ready 8:00 AM") }
-            .setNegativeButton("Cancel", null)
-            .show()
+        FlashDialog.show(this, "Send to lab?", "The roll is finished and develops at 8:00 AM. No more photos can be added to it.",
+            listOf(FlashDialog.Option("Send to lab", FlashDialog.Style.PRIMARY) {
+                Rolls.sendToLab(this); refreshRoll(); toast("Developing · ready 8:00 AM")
+            }))
     }
 
     private fun confirmDiscard() {
-        dialog().setTitle("Discard this roll?")
-            .setMessage("All photos on it will be deleted. This can't be undone.")
-            .setPositiveButton("Discard") { _, _ -> Rolls.discardActive(this); refreshRoll() }
-            .setNegativeButton("Cancel", null)
-            .show()
+        FlashDialog.show(this, "Discard this roll?", "Every photo on it will be deleted. This can't be undone.",
+            listOf(FlashDialog.Option("Discard roll", FlashDialog.Style.DANGER) { Rolls.discardActive(this); refreshRoll() }))
     }
 
     private fun rollFinishedDialog() {
-        val sizes = intArrayOf(36, 24, 12)
-        dialog().setTitle("Roll finished")
-            .setMessage("Developing · ready 8:00 AM. Load another roll?")
-            .setPositiveButton("Load 36") { _, _ -> loadRoll(36) }
-            .setNeutralButton("Other size") { _, _ ->
-                dialog().setTitle("Load a roll")
-                    .setItems(sizes.map { "$it exposures" }.toTypedArray()) { _, i -> loadRoll(sizes[i]) }
-                    .show()
-            }
-            .setNegativeButton("Not now", null)
-            .show()
+        FlashDialog.loadRoll(this, "Roll finished", "Developing · ready 8:00 AM. Load another roll?") { loadRoll(it) }
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()

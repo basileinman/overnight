@@ -112,6 +112,12 @@ object Rolls {
         schedule(c)
     }
 
+    /** Hidden test hook: develop a lab roll right now. */
+    fun developNow(c: Context, id: String): List<Developed> {
+        synchronized(lock) { setLab(c, lab(c).map { if (it.id == id) it.copy(ready = 0L) else it }) }
+        return developDue(c)
+    }
+
     fun discardActive(c: Context): Unit = synchronized(lock) {
         val a = active(c) ?: return
         setActive(c, null)
