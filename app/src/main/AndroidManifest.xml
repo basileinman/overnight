@@ -34,10 +34,12 @@
 
         <activity
             android:name=".ViewerActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:screenOrientation="portrait" />
 
-        <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="segmentation_selfie" />
+        <activity
+            android:name=".EditActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
     </application>
 </manifest>

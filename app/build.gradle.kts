@@ -11,8 +11,8 @@ android {
         applicationId = "app.flashcam"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.13"
+        versionCode = 14
+        versionName = "0.14"
     }
 
     signingConfigs {
@@ -26,7 +26,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
             signingConfig = signingConfigs.getByName("shared")
         }
     }
@@ -49,6 +51,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.9.3")
 
-    // On-device person segmentation, used in place of LiDAR depth
-    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
 }

@@ -1,10 +1,6 @@
 package app.flashcam
 
 import android.graphics.Bitmap
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.segmentation.Segmentation
-import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
@@ -115,14 +111,6 @@ class Look {
         return Lut(ch[0], ch[1], ch[2])
     }
 
-    private val segmenter by lazy {
-        Segmentation.getClient(
-            SelfieSegmenterOptions.Builder()
-                .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
-                .build()
-        )
-    }
-
     fun process(input: Bitmap, p: Params, seed: Long): Bitmap {
         val rnd = Random(seed)
 
@@ -146,7 +134,7 @@ class Look {
 
         // 3. drag blur (mask only used here)
         if (p.drag) {
-            val mask = subjectMask(base, w, h)
+            val mask = subjectMask(w, h)
             applyDrag(px, w, h, mask, rnd)
         }
         base.recycle()
@@ -307,44 +295,17 @@ class Look {
 
     // ---------- subject mask (drag mode only) ----------
 
-    private fun subjectMask(bmp: Bitmap, w: Int, h: Int): FloatArray {
-        val radial = FloatArray(w * h)
+    /** Center-weighted subject estimate (where the flash lands). Used only to keep the middle sharper in BLUR. */
+    private fun subjectMask(w: Int, h: Int): FloatArray {
+        val m = FloatArray(w * h)
         for (y in 0 until h) {
-            val cy = ((y + 0.5f) / h - 0.45f) / 0.40f
+            val cy = ((y + 0.5f) / h - 0.45f) / 0.34f
             for (x in 0 until w) {
-                val cx = ((x + 0.5f) / w - 0.5f) / 0.34f
-                radial[y * w + x] = exp(-(cx * cx + cy * cy))
+                val cx = ((x + 0.5f) / w - 0.5f) / 0.28f
+                m[y * w + x] = exp(-(cx * cx + cy * cy))
             }
         }
-
-        val seg: FloatArray? = try {
-            val m = Tasks.await(segmenter.process(InputImage.fromBitmap(bmp, 0)))
-            val mw = m.width
-            val mh = m.height
-            val buf = m.buffer
-            buf.rewind()
-            val raw = FloatArray(mw * mh)
-            buf.asFloatBuffer().get(raw)
-            if (mw == w && mh == h) raw else {
-                FloatArray(w * h) { i ->
-                    val sx = ((i % w) * mw / w).coerceIn(0, mw - 1)
-                    val sy = ((i / w) * mh / h).coerceIn(0, mh - 1)
-                    raw[sy * mw + sx]
-                }
-            }
-        } catch (t: Throwable) {
-            null
-        }
-
-        var coverage = 0
-        if (seg != null) for (v in seg) if (v > 0.5f) coverage++
-
-        return if (seg == null || coverage < (w * h) / 100) {
-            radial
-        } else {
-            val soft = blurField(seg, w, h, max(4, max(w, h) / 70))
-            FloatArray(w * h) { soft[it].coerceIn(0f, 1f) }
-        }
+        return m
     }
 
     // ---------- drag blur ----------

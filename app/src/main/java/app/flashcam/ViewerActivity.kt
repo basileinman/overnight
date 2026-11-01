@@ -1,78 +1,148 @@
 package app.flashcam
 
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.TypedValue
-import android.view.GestureDetector
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.widget.ViewPager2
 import java.util.concurrent.Executors
-import kotlin.math.abs
-import kotlin.math.max
 
-/** Full-screen frame viewer. Swipe left/right to move through the roll. */
+/** Full-screen viewer: fluid swipe between frames, pinch-zoom, share / ♥ / delete / edit, burst loop. */
 class ViewerActivity : ComponentActivity() {
 
+    private val ORANGE = GalleryActivity.ORANGE
     private val main = Handler(Looper.getMainLooper())
-    private val loader = Executors.newSingleThreadExecutor()
+    private val loader = Executors.newFixedThreadPool(2)
     private var photos: List<Roll.Photo> = emptyList()
-    private var index = 0
-    private lateinit var image: ZoomImageView
+    private var favOnly = false
+
+    private lateinit var pager: ViewPager2
     private lateinit var numText: TextView
+    private lateinit var heart: TextView
+    private lateinit var loopBtn: TextView
+    private val adapter = PageAdapter()
+
+    private var looping = false
+    private var loopFrames: List<Bitmap> = emptyList()
+    private var loopIdx = 0
+    private val loopTick = object : Runnable {
+        override fun run() {
+            if (!looping || loopFrames.isEmpty()) return
+            currentImage()?.setImageBitmap(loopFrames[loopIdx % loopFrames.size])
+            loopIdx++
+            main.postDelayed(this, 170)
+        }
+    }
+
+    private val deletePrompt = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { reload() }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        index = intent.getIntExtra("index", 0)
+        favOnly = intent.getBooleanExtra(GalleryActivity.EXTRA_FAV_ONLY, false)
+        val startIndex = intent.getIntExtra(GalleryActivity.EXTRA_INDEX, 0)
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        image = ZoomImageView(this)
-        root.addView(image, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(14), dp(20), dp(14))
+        pager = ViewPager2(this).apply {
+            adapter = this@ViewerActivity.adapter
+            offscreenPageLimit = 1
+            registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+                override fun onPageSelected(position: Int) { stopLoop(); updateBars() }
+            })
         }
-        val back = label("‹ ROLL", Color.WHITE).apply { setOnClickListener { finish() } }
-        numText = label("", 0x99FFFFFF.toInt()).apply { gravity = Gravity.CENTER }
-        val share = label("SHARE", 0xFFFF7A1F.toInt()).apply { setOnClickListener { share() } }
-        bar.addView(back, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        bar.addView(numText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        bar.addView(share, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { })
-        share.gravity = Gravity.END
-        root.addView(bar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM))
-        setContentView(root)
+        root.addView(pager, FrameLayout.LayoutParams(-1, -1))
 
+        // top: CLOSE   001   EDIT
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(22), dp(14), dp(22), dp(14))
+        }
+        val close = label("CLOSE", ORANGE).apply { setOnClickListener { finish() } }
+        numText = label("", 0x99FFFFFF.toInt()).apply { gravity = Gravity.CENTER }
+        val edit = label("EDIT", Color.WHITE).apply {
+            gravity = Gravity.END
+            setOnClickListener {
+                val p = current() ?: return@setOnClickListener
+                stopLoop()
+                startActivity(Intent(this@ViewerActivity, EditActivity::class.java).putExtra("uri", p.uri.toString()))
+            }
+        }
+        top.addView(close, LinearLayout.LayoutParams(0, -2, 1f))
+        top.addView(numText, LinearLayout.LayoutParams(0, -2, 1f))
+        top.addView(edit, LinearLayout.LayoutParams(0, -2, 1f))
+        root.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+
+        // bottom: SHARE   ♥   DELETE   (+ LOOP for bursts)
+        val bottomCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
+        loopBtn = label("▶ LOOP", Color.WHITE).apply {
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener { if (looping) stopLoop() else startLoop() }
+            visibility = View.GONE
+        }
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(22), dp(18), dp(22), dp(18))
+        }
+        val share = label("SHARE", Color.WHITE).apply {
+            setOnClickListener { current()?.let { RollActions.share(this@ViewerActivity, listOf(it.uri)) } }
+        }
+        heart = label("♡", Color.WHITE).apply {
+            gravity = Gravity.CENTER
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+            setOnClickListener {
+                val p = current() ?: return@setOnClickListener
+                Roll.setFavorite(this@ViewerActivity, p.id, !Roll.isFavorite(this@ViewerActivity, p.id))
+                updateBars()
+            }
+        }
+        val del = label("DELETE", Color.WHITE).apply {
+            gravity = Gravity.END
+            setOnClickListener {
+                val p = current() ?: return@setOnClickListener
+                stopLoop()
+                if (RollActions.delete(this@ViewerActivity, listOf(p.uri), deletePrompt)) reload()
+            }
+        }
+        bottom.addView(share, LinearLayout.LayoutParams(0, -2, 1f))
+        bottom.addView(heart, LinearLayout.LayoutParams(0, -2, 1f))
+        bottom.addView(del, LinearLayout.LayoutParams(0, -2, 1f))
+        bottomCol.addView(loopBtn)
+        bottomCol.addView(bottom, LinearLayout.LayoutParams(-1, -2))
+        root.addView(bottomCol, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+
+        setContentView(root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(0, bars.top, 0, bars.bottom)
             insets
         }
+        loadList { pager.setCurrentItem(startIndex.coerceIn(0, (photos.size - 1).coerceAtLeast(0)), false); updateBars() }
+    }
 
-        // swipe left = older frame (list is newest first); only when not zoomed in
-        image.onSwipe = { dir -> show(if (dir < 0) index + 1 else index - 1) }
+    override fun onResume() {
+        super.onResume()
+        if (photos.isNotEmpty()) reload()  // picks up edits
+    }
 
-        loader.execute {
-            val list = Roll.load(this)
-            main.post {
-                photos = list
-                show(index)
-            }
-        }
+    override fun onPause() {
+        super.onPause()
+        stopLoop()
     }
 
     override fun onDestroy() {
@@ -80,32 +150,91 @@ class ViewerActivity : ComponentActivity() {
         loader.shutdownNow()
     }
 
-    private fun label(text: String, color: Int) = TextView(this).apply {
-        this.text = text
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        setTextColor(color)
-        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
-        letterSpacing = 0.12f
-    }
-
-    private fun show(i: Int) {
-        if (photos.isEmpty()) { finish(); return }
-        index = i.coerceIn(0, photos.size - 1)
-        val p = photos[index]
-        numText.text = "%03d".format(p.number)
-        val edge = 2400  // full photo resolution so zooming stays sharp
+    private fun loadList(then: () -> Unit) {
         loader.execute {
-            val bmp = Roll.decodeSampled(this, p.uri, edge)
-            main.post { if (photos.getOrNull(index)?.id == p.id) image.setImageBitmap(bmp) }
+            var list = Roll.load(this)
+            if (favOnly) { val f = Roll.favorites(this); list = list.filter { it.id in f } }
+            main.post {
+                photos = list
+                adapter.notifyDataSetChanged()
+                if (photos.isEmpty()) finish() else then()
+            }
         }
     }
 
-    private fun share() {
-        val p = photos.getOrNull(index) ?: return
-        val send = Intent(Intent.ACTION_SEND)
-            .setType("image/jpeg")
-            .putExtra(Intent.EXTRA_STREAM, p.uri)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        startActivity(Intent.createChooser(send, "Share photo"))
+    private fun reload() {
+        val keep = pager.currentItem
+        loadList { pager.setCurrentItem(keep.coerceIn(0, photos.size - 1), false); updateBars() }
+    }
+
+    private fun current() = photos.getOrNull(pager.currentItem)
+
+    private fun currentImage(): ZoomImageView? {
+        val rv = pager.getChildAt(0) as? RecyclerView ?: return null
+        return (rv.findViewHolderForAdapterPosition(pager.currentItem) as? PageHolder)?.img
+    }
+
+    private fun updateBars() {
+        val p = current() ?: return
+        numText.text = "%03d".format(p.number)
+        val fav = Roll.isFavorite(this, p.id)
+        heart.text = if (fav) "♥" else "♡"
+        heart.setTextColor(if (fav) ORANGE else Color.WHITE)
+        loopBtn.visibility = if (p.burstKey != null) View.VISIBLE else View.GONE
+        loopBtn.text = if (looping) "■ STOP" else "▶ LOOP"
+    }
+
+    // ---------- burst loop (flipbook of the 5 frames) ----------
+
+    private fun startLoop() {
+        val key = current()?.burstKey ?: return
+        val frames = photos.filter { it.burstKey == key }.sortedBy { it.name }
+        if (frames.size < 2) return
+        looping = true; updateBars()
+        val edge = resources.displayMetrics.heightPixels
+        loader.execute {
+            val bmps = frames.mapNotNull { Roll.decodeSampled(this, it.uri, edge) }
+            main.post {
+                if (!looping) return@post
+                loopFrames = bmps; loopIdx = 0
+                main.post(loopTick)
+            }
+        }
+    }
+
+    private fun stopLoop() {
+        if (!looping && loopFrames.isEmpty()) return
+        looping = false
+        main.removeCallbacks(loopTick)
+        loopFrames = emptyList()
+        updateBars()
+        adapter.notifyItemChanged(pager.currentItem)  // restore the still frame
+    }
+
+    private fun label(text: String, color: Int) = TextView(this).apply {
+        this.text = text
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        setTextColor(color)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        letterSpacing = 0.14f
+    }
+
+    private inner class PageHolder(val img: ZoomImageView) : RecyclerView.ViewHolder(img)
+
+    private inner class PageAdapter : RecyclerView.Adapter<PageHolder>() {
+        override fun getItemCount() = photos.size
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageHolder {
+            val v = ZoomImageView(this@ViewerActivity).apply { layoutParams = ViewGroup.LayoutParams(-1, -1) }
+            return PageHolder(v)
+        }
+        override fun onBindViewHolder(h: PageHolder, position: Int) {
+            val p = photos[position]
+            h.img.tag = p.id
+            h.img.setImageDrawable(null)
+            loader.execute {
+                val bmp = Roll.decodeSampled(this@ViewerActivity, p.uri, 2400) ?: return@execute
+                main.post { if (h.img.tag == p.id) h.img.setImageBitmap(bmp) }
+            }
+        }
     }
 }

@@ -89,7 +89,8 @@ class MainActivity : ComponentActivity() {
     private var far = false
     private var torchFlash = false
     private var burst = false
-    private var drag = false
+    private var drag = false       // fake BLUR effect
+    private var realDrag = false   // slow shutter + flash
     private var front = false
     private var debug = false
     private var evAm = 0f
@@ -162,7 +163,16 @@ class MainActivity : ComponentActivity() {
         focusBtn.setOnClickListener { if (!busy) { far = !far; save(); refreshUi(); reopen() } }
         flashBtn.setOnClickListener { torchFlash = !torchFlash; save(); refreshUi() }
         burstBtn.setOnClickListener { burst = !burst; save(); refreshUi() }
-        blurBtn.setOnClickListener { drag = !drag; save(); refreshUi() }
+        blurBtn.setOnClickListener {
+            // OFF -> BLUR (effect) -> DRAG (real slow shutter + flash) -> OFF
+            when {
+                !drag && !realDrag -> drag = true
+                drag -> { drag = false; realDrag = true }
+                else -> realDrag = false
+            }
+            engine.setDrag(realDrag)
+            refreshUi()
+        }
         flipBtn.setOnClickListener { if (!busy) { front = !front; save(); refreshUi(); reopen() } }
         thumb.setOnClickListener { startActivity(Intent(this, GalleryActivity::class.java)) }
         statusText.setOnLongClickListener {
@@ -233,7 +243,7 @@ class MainActivity : ComponentActivity() {
         if (!hasPerms() || !texture.isAvailable) return
         cameraReady = false
         engine.open(
-            CameraEngine.Config(front = front, pm = pmMode, far = far, ev = currentEv()),
+            CameraEngine.Config(front = front, pm = pmMode, far = far, ev = currentEv(), drag = realDrag),
             onReady = { info ->
                 cameraReady = true
                 if (info.isFront != front) { front = info.isFront; refreshUi() }
@@ -263,7 +273,7 @@ class MainActivity : ComponentActivity() {
         texture.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
         val n = if (burst) BURST_COUNT else 1
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag)
+        val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
         val stripFrames: MutableList<Bitmap> = Collections.synchronizedList(ArrayList())
         captureNext(0, n, stamp, params, stripFrames)
     }
@@ -463,7 +473,9 @@ class MainActivity : ComponentActivity() {
         flashBtn.setTextColor(if (torchFlash) grey else ORANGE)
         burstBtn.text = if (burst) "×5" else "×1"
         burstBtn.setTextColor(if (burst) ORANGE else grey)
-        blurBtn.setTextColor(if (drag) ORANGE else grey)
+        blurBtn.text = if (realDrag) "DRAG" else "BLUR"
+        blurBtn.setTextColor(if (drag || realDrag) ORANGE else grey)
+        blurBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
         refreshRoll()
     }
 

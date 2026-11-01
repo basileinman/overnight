@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -13,90 +14,143 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.widget.BaseAdapter
-import android.widget.GridView
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import java.util.concurrent.Executors
 
-/** Film-roll grid: three across, 2:3 frames, numbered like negatives. */
+/** Film-roll grid: MAIN / ♥ tabs, three across, numbered frames, multi-select to share or delete. */
 class GalleryActivity : ComponentActivity() {
+
+    companion object {
+        const val ORANGE = 0xFFFF7A1F.toInt()
+        const val EXTRA_FAV_ONLY = "favOnly"
+        const val EXTRA_INDEX = "index"
+    }
 
     private val main = Handler(Looper.getMainLooper())
     private val loader = Executors.newFixedThreadPool(3)
-    private val cache = object : LruCache<Long, Bitmap>(24 * 1024 * 1024) {
+    private val cache = object : LruCache<Long, Bitmap>(48 * 1024 * 1024) {
         override fun sizeOf(key: Long, value: Bitmap) = value.byteCount
     }
-    private var photos: List<Roll.Photo> = emptyList()
-    private lateinit var grid: GridView
-    private lateinit var countText: TextView
+
+    private var all: List<Roll.Photo> = emptyList()
+    private var shown: List<Roll.Photo> = emptyList()
+    private var favOnly = false
+    private var selecting = false
+    private val selected = LinkedHashSet<Long>()
+
+    private lateinit var grid: RecyclerView
+    private lateinit var tabMain: TextView
+    private lateinit var tabFav: TextView
+    private lateinit var selectBtn: TextView
+    private lateinit var bottomBar: LinearLayout
+    private lateinit var emptyText: TextView
     private val adapter = Adapter()
+
+    private val deletePrompt = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
+        exitSelect(); reload()
+    }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.BLACK)
-        }
+        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+        // header: MAIN  ♥            SELECT  DONE
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(14), dp(20), dp(14))
+            setPadding(dp(18), dp(16), dp(18), dp(12))
         }
-        val title = mono("ROLL", 15f, Color.WHITE).apply { setTypeface(Typeface.MONOSPACE, Typeface.BOLD) }
-        countText = mono("", 12f, 0x80FFFFFF.toInt()).apply { setPadding(dp(12), 0, 0, 0) }
-        val spacer = View(this)
-        val done = mono("DONE", 14f, 0xFFFF7A1F.toInt()).apply {
-            setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-            setPadding(dp(12), dp(6), 0, dp(6))
+        tabMain = label("MAIN", 15f, Color.WHITE).apply { setOnClickListener { setTab(false) } }
+        tabFav = label("♥", 17f, 0x80FFFFFF.toInt()).apply {
+            setPadding(dp(22), 0, dp(8), 0)
+            setOnClickListener { setTab(true) }
+        }
+        selectBtn = label("SELECT", 14f, Color.WHITE).apply {
+            setPadding(dp(12), dp(6), dp(18), dp(6))
+            setOnClickListener { if (selecting) exitSelect() else enterSelect() }
+        }
+        val done = label("DONE", 14f, ORANGE).apply {
+            setPadding(dp(6), dp(6), 0, dp(6))
             setOnClickListener { finish() }
         }
-        header.addView(title)
-        header.addView(countText)
-        header.addView(spacer, LinearLayout.LayoutParams(0, 1, 1f))
+        header.addView(tabMain)
+        header.addView(tabFav)
+        header.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        header.addView(selectBtn)
         header.addView(done)
 
-        grid = GridView(this).apply {
-            numColumns = 3
-            horizontalSpacing = dp(6)
-            verticalSpacing = dp(10)
-            setPadding(dp(14), dp(4), dp(14), dp(14))
+        grid = RecyclerView(this).apply {
+            layoutManager = GridLayoutManager(this@GalleryActivity, 3)
+            setPadding(dp(12), dp(4), dp(12), dp(90))
             clipToPadding = false
-            stretchMode = GridView.STRETCH_COLUMN_WIDTH
             adapter = this@GalleryActivity.adapter
-            setOnItemClickListener { _, _, pos, _ ->
-                startActivity(Intent(this@GalleryActivity, ViewerActivity::class.java).putExtra("index", pos))
+            setItemViewCacheSize(30)
+        }
+        emptyText = label("", 13f, 0x66FFFFFF.toInt()).apply {
+            gravity = Gravity.CENTER; visibility = View.GONE
+        }
+
+        column.addView(header)
+        val body = FrameLayout(this)
+        body.addView(grid, FrameLayout.LayoutParams(-1, -1))
+        body.addView(emptyText, FrameLayout.LayoutParams(-1, -1))
+        column.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(column, FrameLayout.LayoutParams(-1, -1))
+
+        // select-mode bottom bar: SHARE | DELETE
+        bottomBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(0xF20E0E0E.toInt())
+            visibility = View.GONE
+        }
+        val share = label("SHARE", 15f, Color.WHITE).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(22), 0, dp(22))
+            setOnClickListener { RollActions.share(this@GalleryActivity, selectedPhotos().map { it.uri }) }
+        }
+        val del = label("DELETE", 15f, ORANGE).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(22), 0, dp(22))
+            setOnClickListener {
+                val sel = selectedPhotos()
+                if (sel.isNotEmpty() && RollActions.delete(this@GalleryActivity, sel.map { it.uri }, deletePrompt)) {
+                    exitSelect(); reload()
+                }
             }
         }
+        bottomBar.addView(share, LinearLayout.LayoutParams(0, -2, 1f))
+        bottomBar.addView(del, LinearLayout.LayoutParams(0, -2, 1f))
+        root.addView(bottomBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
 
-        root.addView(header)
-        root.addView(grid, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
-
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(0, bars.top, 0, bars.bottom)
+            v.setPadding(0, bars.top, 0, 0)
+            bottomBar.setPadding(0, 0, 0, bars.bottom)
+            grid.setPadding(dp(12), dp(4), dp(12), dp(24) + bars.bottom)
             insets
         }
+        updateTabs()
     }
+
+    private var resumedOnce = false
 
     override fun onResume() {
         super.onResume()
-        loader.execute {
-            val list = Roll.load(this)
-            main.post {
-                photos = list
-                countText.text = "%03d FRAMES".format(list.size)
-                adapter.notifyDataSetChanged()
-            }
-        }
+        if (resumedOnce) cache.evictAll()  // pick up edits/deletes made in the viewer
+        resumedOnce = true
+        reload()
     }
 
     override fun onDestroy() {
@@ -104,12 +158,68 @@ class GalleryActivity : ComponentActivity() {
         loader.shutdownNow()
     }
 
-    private fun mono(text: String, sp: Float, color: Int) = TextView(this).apply {
+    private fun reload() {
+        loader.execute {
+            val list = Roll.load(this)
+            main.post { all = list; applyFilter() }
+        }
+    }
+
+    private fun applyFilter() {
+        val favs = Roll.favorites(this)
+        shown = if (favOnly) all.filter { it.id in favs } else all
+        emptyText.text = if (favOnly) "TAP ♥ ON A PHOTO TO SAVE IT HERE" else "NO PHOTOS YET"
+        emptyText.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun setTab(fav: Boolean) {
+        if (fav == favOnly) return
+        favOnly = fav
+        exitSelect()
+        updateTabs()
+        applyFilter()
+    }
+
+    private fun updateTabs() {
+        tabMain.setTextColor(if (!favOnly) Color.WHITE else 0x80FFFFFF.toInt())
+        tabFav.setTextColor(if (favOnly) ORANGE else 0x80FFFFFF.toInt())
+        tabMain.background = if (!favOnly) underline() else null
+    }
+
+    private fun underline() = object : android.graphics.drawable.Drawable() {
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = ORANGE }
+        override fun draw(c: android.graphics.Canvas) {
+            val b = bounds; val w = dp(22).toFloat(); val h = dp(3).toFloat()
+            c.drawRoundRect(b.left.toFloat(), b.bottom - h, b.left + w, b.bottom.toFloat(), h, h, p)
+        }
+        override fun setAlpha(a: Int) {}
+        override fun setColorFilter(cf: android.graphics.ColorFilter?) {}
+        @Deprecated("Deprecated in Java") override fun getOpacity() = android.graphics.PixelFormat.TRANSLUCENT
+    }
+
+    private fun enterSelect() {
+        selecting = true; selected.clear()
+        selectBtn.text = "CANCEL"
+        bottomBar.visibility = View.VISIBLE
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun exitSelect() {
+        selecting = false; selected.clear()
+        selectBtn.text = "SELECT"
+        bottomBar.visibility = View.GONE
+        adapter.notifyDataSetChanged()
+    }
+
+    private fun selectedPhotos() = shown.filter { it.id in selected }
+
+    private fun label(text: String, sp: Float, color: Int) = TextView(this).apply {
         this.text = text
         setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
         setTextColor(color)
-        typeface = Typeface.MONOSPACE
-        letterSpacing = 0.12f
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        letterSpacing = 0.14f
     }
 
     /** ImageView that is always 2:3 tall. */
@@ -120,43 +230,71 @@ class GalleryActivity : ComponentActivity() {
         }
     }
 
-    private inner class Adapter : BaseAdapter() {
-        override fun getCount() = photos.size
-        override fun getItem(position: Int) = photos[position]
-        override fun getItemId(position: Int) = photos[position].id
+    private inner class Holder(val cell: LinearLayout, val img: ImageView, val num: TextView, val check: View) :
+        RecyclerView.ViewHolder(cell)
 
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val cell = (convertView as? LinearLayout) ?: LinearLayout(this@GalleryActivity).apply {
+    private inner class Adapter : RecyclerView.Adapter<Holder>() {
+        override fun getItemCount() = shown.size
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+            val cell = LinearLayout(this@GalleryActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                val img = FrameImage(context).apply {
-                    scaleType = ImageView.ScaleType.CENTER_CROP
-                    setBackgroundColor(0xFF161616.toInt())
-                    tag = "img"
-                }
-                val num = mono("", 11f, 0x99FFFFFF.toInt()).apply {
-                    setPadding(dp(2), dp(4), 0, 0)
-                    tag = "num"
-                }
-                addView(img, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-                addView(num)
+                setPadding(dp(3), dp(3), dp(3), dp(8))
+                layoutParams = RecyclerView.LayoutParams(-1, -2)
             }
-            val p = photos[position]
-            val img = cell.findViewWithTag<ImageView>("img")
-            val num = cell.findViewWithTag<TextView>("num")
-            num.text = "%03d".format(p.number)
-            img.setTag(R.id.photo_id, p.id)
+            val frame = FrameLayout(this@GalleryActivity)
+            val img = FrameImage(this@GalleryActivity).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(0xFF161616.toInt())
+            }
+            val check = View(this@GalleryActivity)
+            frame.addView(img, FrameLayout.LayoutParams(-1, -2))
+            frame.addView(check, FrameLayout.LayoutParams(dp(24), dp(24), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(8); rightMargin = dp(8)
+            })
+            val num = label("", 12f, 0x99FFFFFF.toInt()).apply { setPadding(dp(1), dp(6), 0, 0) }
+            cell.addView(frame)
+            cell.addView(num)
+            return Holder(cell, img, num, check)
+        }
+
+        override fun onBindViewHolder(h: Holder, position: Int) {
+            val p = shown[position]
+            h.num.text = "%03d".format(p.number)
+            h.check.visibility = if (selecting) View.VISIBLE else View.GONE
+            val on = p.id in selected
+            h.check.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setStroke(dp(2), Color.WHITE)
+                setColor(if (on) ORANGE else 0x33000000)
+            }
+            h.img.alpha = if (selecting && !on) 0.85f else 1f
+            h.cell.setOnClickListener {
+                if (selecting) {
+                    if (!selected.remove(p.id)) selected.add(p.id)
+                    notifyItemChanged(h.bindingAdapterPosition)
+                } else {
+                    startActivity(Intent(this@GalleryActivity, ViewerActivity::class.java)
+                        .putExtra(EXTRA_INDEX, position).putExtra(EXTRA_FAV_ONLY, favOnly))
+                }
+            }
+            h.cell.setOnLongClickListener {
+                if (!selecting) enterSelect()
+                selected.add(p.id); notifyItemChanged(h.bindingAdapterPosition); true
+            }
+            h.img.tag = p.id
             val cached = cache.get(p.id)
             if (cached != null) {
-                img.setImageBitmap(cached)
+                h.img.setImageBitmap(cached)
             } else {
-                img.setImageDrawable(null)
+                h.img.setImageDrawable(null)
+                val edge = resources.displayMetrics.widthPixels * 3 / 2 / 3 * 3 / 2  // ~1.5x cell height for crispness
                 loader.execute {
-                    val bmp = Roll.thumbnail(this@GalleryActivity, p, 360) ?: return@execute
+                    val bmp = Roll.thumbnail(this@GalleryActivity, p, edge.coerceIn(400, 900)) ?: return@execute
                     cache.put(p.id, bmp)
-                    main.post { if (img.getTag(R.id.photo_id) == p.id) img.setImageBitmap(bmp) }
+                    main.post { if (h.img.tag == p.id) h.img.setImageBitmap(bmp) }
                 }
             }
-            return cell
         }
     }
 }

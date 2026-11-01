@@ -34,7 +34,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
 
     enum class Flash { PULSE, TORCH, SCREEN, NONE }
 
-    data class Config(val front: Boolean, val pm: Boolean, val far: Boolean, val ev: Float = 0f)
+    data class Config(val front: Boolean, val pm: Boolean, val far: Boolean, val ev: Float = 0f, val drag: Boolean = false)
 
     data class Info(val isFront: Boolean, val hasFlash: Boolean, val manualSensor: Boolean)
 
@@ -52,6 +52,9 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         const val CLOSE_M = 0.91f                   // 3 ft
         const val FAR_M = 1.83f                     // 6 ft
         const val TORCH_SETTLE_MS = 300L
+        // DRAG: slow shutter so lights streak, flash freezes the subject
+        const val DRAG_EXPOSURE_NS = 200_000_000L  // 1/5 s
+        const val DRAG_MAX_ISO = 400
     }
 
     private val manager = context.getSystemService(CameraManager::class.java)
@@ -229,6 +232,11 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     }
 
     /** Change exposure compensation live (DAY preview + pulse ISO for the next shot). */
+    fun setDrag(on: Boolean) {
+        val cfg = config ?: return
+        config = cfg.copy(drag = on)
+    }
+
     fun setEv(ev: Float) {
         val cfg = config ?: return
         config = cfg.copy(ev = ev)
@@ -311,6 +319,12 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
             exp = PULSE_EXPOSURE_NS
             iso = (PULSE_ISO * Math.pow(2.0, (config?.ev ?: 0f).toDouble())).toInt()
         }
+        if (config?.drag == true) {
+            // keep the room's overall brightness about the same, but over a long shutter
+            val target = if (mExp > 0 && mIso > 0) mExp.toDouble() * mIso else exp.toDouble() * iso
+            exp = DRAG_EXPOSURE_NS
+            iso = (target / exp).roundToInt().coerceIn(minIso, DRAG_MAX_ISO)
+        }
         expRange?.let { exp = exp.coerceIn(it.lower, it.upper) }
         isoRange?.let { iso = iso.coerceIn(it.lower, it.upper) }
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
@@ -318,6 +332,10 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
         b.set(CaptureRequest.SENSOR_FRAME_DURATION, max(exp, 33_333_333L))
         b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
+        if (config?.drag == true) {
+            b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+            b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+        }
         b.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
         return b.build()
     }
