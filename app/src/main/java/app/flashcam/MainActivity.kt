@@ -150,7 +150,7 @@ class MainActivity : ComponentActivity() {
         far = prefs.getBoolean("far", false)
         torchFlash = false  // always launch with PULSE
         burst = prefs.getBoolean("burst", false)
-        drag = prefs.getBoolean("drag", false)
+        drag = false  // BLUR always starts off
         front = prefs.getBoolean("front", false)
         debug = prefs.getBoolean("debug", false)
         evAm = prefs.getFloat("evAm", 0f)
