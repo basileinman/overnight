@@ -265,7 +265,7 @@ class GalleryActivity : ComponentActivity() {
         }
     }
 
-    /** Hidden: hold a DEVELOPING card for 5 seconds to develop it immediately. */
+    /** Hidden: hold a DEVELOPING card for 3 seconds to develop it immediately. */
     private fun attachDevelopNow(v: View, card: Item.Card) {
         if (card.inCamera) { v.setOnTouchListener(null); return }
         val fire = Runnable {
@@ -284,7 +284,7 @@ class GalleryActivity : ComponentActivity() {
         }
         v.setOnTouchListener { view, e ->
             when (e.actionMasked) {
-                android.view.MotionEvent.ACTION_DOWN -> { view.parent?.requestDisallowInterceptTouchEvent(true); main.postDelayed(fire, 5000) }
+                android.view.MotionEvent.ACTION_DOWN -> { view.parent?.requestDisallowInterceptTouchEvent(true); main.postDelayed(fire, 3000) }
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> { view.parent?.requestDisallowInterceptTouchEvent(false); main.removeCallbacks(fire) }
             }
             true
