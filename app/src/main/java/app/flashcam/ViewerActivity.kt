@@ -29,7 +29,7 @@ class ViewerActivity : ComponentActivity() {
     private val loader = Executors.newSingleThreadExecutor()
     private var photos: List<Roll.Photo> = emptyList()
     private var index = 0
-    private lateinit var image: ImageView
+    private lateinit var image: ZoomImageView
     private lateinit var numText: TextView
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
@@ -39,7 +39,7 @@ class ViewerActivity : ComponentActivity() {
         index = intent.getIntExtra("index", 0)
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        image = ZoomImageView(this)
         root.addView(image, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
 
         val bar = LinearLayout(this).apply {
@@ -63,20 +63,8 @@ class ViewerActivity : ComponentActivity() {
             insets
         }
 
-        val detector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDown(e: MotionEvent) = true
-            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
-                val start = e1 ?: return false
-                val dx = e2.x - start.x
-                if (abs(dx) > dp(60) && abs(dx) > abs(e2.y - start.y)) {
-                    // swipe left = older frame (list is newest first)
-                    show(if (dx < 0) index + 1 else index - 1)
-                    return true
-                }
-                return false
-            }
-        })
-        image.setOnTouchListener { _, ev -> detector.onTouchEvent(ev) }
+        // swipe left = older frame (list is newest first); only when not zoomed in
+        image.onSwipe = { dir -> show(if (dir < 0) index + 1 else index - 1) }
 
         loader.execute {
             val list = Roll.load(this)
@@ -105,7 +93,7 @@ class ViewerActivity : ComponentActivity() {
         index = i.coerceIn(0, photos.size - 1)
         val p = photos[index]
         numText.text = "%03d".format(p.number)
-        val edge = max(resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels)
+        val edge = 2400  // full photo resolution so zooming stays sharp
         loader.execute {
             val bmp = Roll.decodeSampled(this, p.uri, edge)
             main.post { if (photos.getOrNull(index)?.id == p.id) image.setImageBitmap(bmp) }
