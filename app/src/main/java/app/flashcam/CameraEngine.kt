@@ -45,8 +45,10 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         const val PULSE_ISO = 900
         // Metered pulse caps: in dim rooms these stop the background from brightening,
         // so the flash does the work and the background falls dark (the reference look)
-        const val PULSE_MAX_EXPOSURE_NS = 20_000_000L  // 1/50 s
-        const val PULSE_MAX_ISO = 1250
+        // v0.10: lowered after close portraits blew out — the flash adds on top of the
+        // ambient reading, so dim rooms must not be metered brighter than this
+        const val PULSE_MAX_EXPOSURE_NS = 12_500_000L  // 1/80 s
+        const val PULSE_MAX_ISO = 800
         const val CLOSE_M = 0.91f                   // 3 ft
         const val FAR_M = 1.83f                     // 6 ft
         const val TORCH_SETTLE_MS = 300L
@@ -299,7 +301,10 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
             // capped so dim rooms stay dark and the flash lights the subject.
             val target = mExp.toDouble() * mIso
             exp = min(mExp, PULSE_MAX_EXPOSURE_NS)
-            iso = (target / exp).roundToInt().coerceIn(minIso, PULSE_MAX_ISO)
+            // exposure slider still nudges the cap so dark/far shots can be brightened
+            val evScale = Math.pow(2.0, (config?.ev ?: 0f).toDouble().coerceAtLeast(0.0))
+            val isoCap = (PULSE_MAX_ISO * evScale).toInt()
+            iso = (target / exp).roundToInt().coerceIn(minIso, isoCap)
             // very bright scenes: drop shutter time instead of going below base ISO
             if (iso == minIso && target / exp < minIso) exp = max(100_000L, (target / minIso).toLong())
         } else {
