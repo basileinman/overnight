@@ -22,7 +22,7 @@ object PhotoMeta {
 
     /** Encode [bmp] as JPEG bytes with metadata attached. */
     fun encode(ctx: Context, bmp: Bitmap, quality: Int, meta: JSONObject?): ByteArray {
-        val tmp = File.createTempFile("fc", ".jpg", ctx.cacheDir)
+        val tmp = File.createTempFile("flashcam", ".jpg", ctx.cacheDir)
         try {
             tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, quality, it) }
             if (meta != null) write(tmp, meta)
