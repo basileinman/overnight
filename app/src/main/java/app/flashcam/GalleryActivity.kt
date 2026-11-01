@@ -43,6 +43,13 @@ class GalleryActivity : ComponentActivity() {
 
     private var all: List<Roll.Photo> = emptyList()
     private var shown: List<Roll.Photo> = emptyList()
+
+    private sealed class Item {
+        class Card(val title: String, val sub: String, val frames: Int, val total: Int) : Item()
+        class Divider(val text: String) : Item()
+        class Pic(val index: Int) : Item()
+    }
+    private var items: List<Item> = emptyList()
     private var favOnly = false
     private var selecting = false
     private val selected = LinkedHashSet<Long>()
@@ -93,7 +100,11 @@ class GalleryActivity : ComponentActivity() {
         header.addView(done)
 
         grid = RecyclerView(this).apply {
-            layoutManager = GridLayoutManager(this@GalleryActivity, 3)
+            layoutManager = GridLayoutManager(this@GalleryActivity, 3).apply {
+                spanSizeLookup = object : GridLayoutManager.SpanSizeLookup() {
+                    override fun getSpanSize(position: Int) = if (items.getOrNull(position) is Item.Pic) 1 else 3
+                }
+            }
             setPadding(dp(12), dp(4), dp(12), dp(90))
             clipToPadding = false
             adapter = this@GalleryActivity.adapter
@@ -160,6 +171,8 @@ class GalleryActivity : ComponentActivity() {
 
     private fun reload() {
         loader.execute {
+            val dev = Rolls.tick(this)
+            if (dev.isNotEmpty()) main.post { android.widget.Toast.makeText(this, "Your roll is developed", android.widget.Toast.LENGTH_SHORT).show() }
             val list = Roll.load(this)
             main.post { all = list; applyFilter() }
         }
@@ -169,7 +182,29 @@ class GalleryActivity : ComponentActivity() {
         val favs = Roll.favorites(this)
         shown = if (favOnly) all.filter { it.id in favs } else all
         emptyText.text = if (favOnly) "TAP ♥ ON A PHOTO TO SAVE IT HERE" else "NO PHOTOS YET"
-        emptyText.visibility = if (shown.isEmpty()) View.VISIBLE else View.GONE
+        // build grid items: developing cards, then photos with a divider at the start of each developed roll
+        val out = ArrayList<Item>()
+        if (!favOnly) {
+            Rolls.active(this)?.let { a ->
+                if (a.used > 0) out.add(Item.Card("IN CAMERA", "${a.used} OF ${a.size} SHOT", a.used, a.size))
+            }
+            Rolls.lab(this).sortedBy { it.ready }.forEach { r ->
+                out.add(Item.Card("DEVELOPING", Rolls.readyLabel(r.ready), r.used, r.size))
+            }
+        }
+        val rollOf = HashMap<String, Rolls.Developed>()
+        Rolls.developed(this).forEach { d -> d.names.forEach { rollOf[it] = d } }
+        val seen = HashSet<String>()
+        val fmt = java.text.SimpleDateFormat("MMM d", java.util.Locale.US)
+        shown.forEachIndexed { i, p ->
+            val d = rollOf[p.name]
+            if (!favOnly && d != null && seen.add(d.id)) {
+                out.add(Item.Divider("ROLL · " + fmt.format(java.util.Date(d.date)).uppercase() + " · ${d.names.size} FRAMES"))
+            }
+            out.add(Item.Pic(i))
+        }
+        items = out
+        emptyText.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
         adapter.notifyDataSetChanged()
     }
 
@@ -230,13 +265,32 @@ class GalleryActivity : ComponentActivity() {
         }
     }
 
-    private inner class Holder(val cell: LinearLayout, val img: ImageView, val num: TextView, val check: View) :
-        RecyclerView.ViewHolder(cell)
+    private inner class Holder(val root: View, val img: ImageView?, val num: TextView?, val check: View?, val text: TextView?) :
+        RecyclerView.ViewHolder(root)
 
     private inner class Adapter : RecyclerView.Adapter<Holder>() {
-        override fun getItemCount() = shown.size
+        override fun getItemCount() = items.size
+        override fun getItemViewType(position: Int) = when (items[position]) { is Item.Pic -> 0; is Item.Card -> 1; is Item.Divider -> 2 }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
+            if (viewType == 1) {
+                val box = LinearLayout(this@GalleryActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(18), dp(16), dp(18), dp(16))
+                    background = GradientDrawable().apply { setColor(0xFF141414.toInt()); cornerRadius = dp(10).toFloat(); setStroke(dp(1), 0x33FF7A1F) }
+                    layoutParams = RecyclerView.LayoutParams(-1, -2).apply { setMargins(dp(3), dp(4), dp(3), dp(12)) }
+                }
+                val t = label("", 13f, Color.WHITE)
+                box.addView(t)
+                return Holder(box, null, null, null, t)
+            }
+            if (viewType == 2) {
+                val t = label("", 11f, 0x80FFFFFF.toInt()).apply {
+                    setPadding(dp(4), dp(14), 0, dp(8))
+                    layoutParams = RecyclerView.LayoutParams(-1, -2)
+                }
+                return Holder(t, null, null, null, t)
+            }
             val cell = LinearLayout(this@GalleryActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(3), dp(3), dp(3), dp(8))
@@ -255,44 +309,61 @@ class GalleryActivity : ComponentActivity() {
             val num = label("", 12f, 0x99FFFFFF.toInt()).apply { setPadding(dp(1), dp(6), 0, 0) }
             cell.addView(frame)
             cell.addView(num)
-            return Holder(cell, img, num, check)
+            return Holder(cell, img, num, check, null)
         }
 
         override fun onBindViewHolder(h: Holder, position: Int) {
-            val p = shown[position]
-            h.num.text = "%03d".format(p.number)
-            h.check.visibility = if (selecting) View.VISIBLE else View.GONE
+            when (val it = items[position]) {
+                is Item.Card -> {
+                    val filled = "■".repeat(it.frames.coerceAtMost(36))
+                    val empty = "□".repeat((it.total - it.frames).coerceIn(0, 36))
+                    h.text!!.text = android.text.SpannableStringBuilder().apply {
+                        append(it.title, android.text.style.ForegroundColorSpan(ORANGE), 0)
+                        append("   " + it.sub + "\n\n")
+                        append(filled + empty, android.text.style.ForegroundColorSpan(0x66FFFFFF), 0)
+                    }
+                }
+                is Item.Divider -> h.text!!.text = it.text
+                is Item.Pic -> bindPic(h, it.index, position)
+            }
+        }
+
+        private fun bindPic(h: Holder, index: Int, position: Int) {
+            val p = shown[index]
+            val img = h.img!!; val check = h.check!!
+            h.num!!.text = "%03d".format(p.number)
+            check.visibility = if (selecting) View.VISIBLE else View.GONE
             val on = p.id in selected
-            h.check.background = GradientDrawable().apply {
+            check.background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
                 setStroke(dp(2), Color.WHITE)
                 setColor(if (on) ORANGE else 0x33000000)
             }
-            h.img.alpha = if (selecting && !on) 0.85f else 1f
-            h.cell.setOnClickListener {
+            img.alpha = if (selecting && !on) 0.85f else 1f
+            h.root.setOnClickListener {
                 if (selecting) {
                     if (!selected.remove(p.id)) selected.add(p.id)
                     notifyItemChanged(h.bindingAdapterPosition)
                 } else {
                     startActivity(Intent(this@GalleryActivity, ViewerActivity::class.java)
-                        .putExtra(EXTRA_INDEX, position).putExtra(EXTRA_FAV_ONLY, favOnly))
+                        .putExtra(EXTRA_INDEX, index).putExtra(EXTRA_FAV_ONLY, favOnly))
                 }
             }
-            h.cell.setOnLongClickListener {
+            h.root.setOnLongClickListener {
                 if (!selecting) enterSelect()
                 selected.add(p.id); notifyItemChanged(h.bindingAdapterPosition); true
             }
-            h.img.tag = p.id
+            img.tag = p.id
             val cached = cache.get(p.id)
             if (cached != null) {
-                h.img.setImageBitmap(cached)
+                img.setImageBitmap(cached)
             } else {
-                h.img.setImageDrawable(null)
-                val edge = resources.displayMetrics.widthPixels * 3 / 2 / 3 * 3 / 2  // ~1.5x cell height for crispness
+                img.setImageDrawable(null)
+                val edge = resources.displayMetrics.widthPixels * 3 / 2 / 3 * 3 / 2
                 loader.execute {
                     val bmp = Roll.thumbnail(this@GalleryActivity, p, edge.coerceIn(400, 900)) ?: return@execute
                     cache.put(p.id, bmp)
-                    main.post { if (h.img.tag == p.id) h.img.setImageBitmap(bmp) }
+                    main.post { if (img.tag == p.id) img.setImageBitmap(bmp) }
                 }
             }
         }

@@ -109,6 +109,8 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+    private val notifLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -175,6 +177,7 @@ class MainActivity : ComponentActivity() {
         }
         flipBtn.setOnClickListener { if (!busy) { front = !front; save(); refreshUi(); reopen() } }
         thumb.setOnClickListener { startActivity(Intent(this, GalleryActivity::class.java)) }
+        statusText.setOnClickListener { if (!busy) rollMenu() }
         statusText.setOnLongClickListener {
             debug = !debug; save(); refreshUi()
             toast(if (debug) "Debug on: originals saved to FlashCam/Originals" else "Debug off")
@@ -209,7 +212,14 @@ class MainActivity : ComponentActivity() {
         }
         orientationListener.enable()
         if (texture.isAvailable) openCamera()
-        loadLastThumb()
+        processExecutor.execute {
+            val dev = Rolls.tick(this)
+            main.post {
+                refreshRoll()
+                if (dev.isNotEmpty()) toast(if (dev.size == 1) "Your roll is developed" else "${dev.size} rolls developed")
+                loadLastThumb()
+            }
+        }
     }
 
     override fun onPause() {
@@ -271,14 +281,18 @@ class MainActivity : ComponentActivity() {
         if (!cameraReady || busy || pending.get() >= MAX_PENDING) return
         busy = true
         texture.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-        val n = if (burst) BURST_COUNT else 1
+        val roll = Rolls.active(this)
+        val n = if (roll != null) Rolls.reserve(this, if (burst) BURST_COUNT else 1) else if (burst) BURST_COUNT else 1
+        if (roll != null && n == 0) { busy = false; rollMenu(); return }
+        val rollId = roll?.id
+        refreshRoll()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
         val stripFrames: MutableList<Bitmap> = Collections.synchronizedList(ArrayList())
-        captureNext(0, n, stamp, params, stripFrames)
+        captureNext(0, n, stamp, params, stripFrames, rollId)
     }
 
-    private fun captureNext(i: Int, n: Int, stamp: String, params: Look.Params, stripFrames: MutableList<Bitmap>) {
+    private fun captureNext(i: Int, n: Int, stamp: String, params: Look.Params, stripFrames: MutableList<Bitmap>, rollId: String?) {
         if (n > 1) {
             counterText.visibility = View.VISIBLE
             counterText.text = "${i + 1}/$n"
@@ -295,18 +309,18 @@ class MainActivity : ComponentActivity() {
                     if (kind == CameraEngine.Flash.SCREEN) hideScreenFlash()
                     if (frame == null) {
                         toast("Capture failed")
-                        endShoot(stamp, n, stripFrames)
+                        endShoot(stamp, n, stripFrames, rollId)
                         return@post
                     }
                     pending.incrementAndGet()
                     processExecutor.execute {
-                        try { processAndSave(frame, stamp, i, n, params, stripFrames) } finally { pending.decrementAndGet() }
+                        try { processAndSave(frame, stamp, i, n, params, stripFrames, rollId) } finally { pending.decrementAndGet() }
                     }
                     if (i + 1 < n) {
                         val wait = max(150L, BURST_INTERVAL_MS - (SystemClock.elapsedRealtime() - started))
-                        main.postDelayed({ captureNext(i + 1, n, stamp, params, stripFrames) }, wait)
+                        main.postDelayed({ captureNext(i + 1, n, stamp, params, stripFrames, rollId) }, wait)
                     } else {
-                        endShoot(stamp, n, stripFrames)
+                        endShoot(stamp, n, stripFrames, rollId)
                     }
                 }
             }
@@ -347,9 +361,16 @@ class MainActivity : ComponentActivity() {
         null
     }
 
-    private fun endShoot(stamp: String, n: Int, stripFrames: MutableList<Bitmap>) {
+    private fun endShoot(stamp: String, n: Int, stripFrames: MutableList<Bitmap>, rollId: String?) {
         counterText.visibility = View.GONE
         busy = false
+        if (rollId != null) {
+            val a = Rolls.active(this)
+            if (a != null && a.id == rollId && a.left <= 0) {
+                // wait for this shot to finish saving into the roll, then send it off
+                processExecutor.execute { main.post { Rolls.sendToLab(this); refreshRoll(); rollFinishedDialog() } }
+            }
+        }
         if (n <= 1) return
         processExecutor.execute {
             if (stripFrames.size >= 2) {
@@ -357,7 +378,8 @@ class MainActivity : ComponentActivity() {
                     val frames = synchronized(stripFrames) { stripFrames.toList() }
                     val date = SimpleDateFormat("dd.MM.yy", Locale.US).format(Date())
                     val strip = Strip.make(frames, "FLASHCAM  $date  ×${frames.size}")
-                    saveJpeg(strip, "FLASH_${stamp}_strip.jpg")
+                    if (rollId != null) Rolls.saveFrame(this, rollId, strip, "FLASH_${stamp}_strip.jpg")
+                    else saveJpeg(strip, "FLASH_${stamp}_strip.jpg")
                     strip.recycle()
                     frames.forEach { it.recycle() }
                 } catch (t: Throwable) {
@@ -369,7 +391,7 @@ class MainActivity : ComponentActivity() {
 
     private fun processAndSave(
         frame: Bitmap, stamp: String, i: Int, n: Int,
-        params: Look.Params, stripFrames: MutableList<Bitmap>,
+        params: Look.Params, stripFrames: MutableList<Bitmap>, rollId: String?,
     ) {
         try {
             if (debug) {
@@ -379,16 +401,14 @@ class MainActivity : ComponentActivity() {
             val out = look.process(frame, params, System.nanoTime())
             frame.recycle()
             val name = if (n > 1) "FLASH_${stamp}_${i + 1}.jpg" else "FLASH_$stamp.jpg"
-            saveJpeg(out, name)
+            if (rollId != null) Rolls.saveFrame(this, rollId, out, name) else saveJpeg(out, name)
             if (n > 1) {
                 stripFrames.add(Bitmap.createScaledBitmap(out, 720, max(1, 720 * out.height / out.width), true))
             }
             val th = Bitmap.createScaledBitmap(out, 160, max(1, 160 * out.height / out.width), true)
             out.recycle()
-            main.post {
-                thumb.setImageBitmap(th)
-                bumpRoll()
-            }
+            // roll shots stay hidden until developed
+            if (rollId == null) main.post { thumb.setImageBitmap(th) }
         } catch (t: Throwable) {
             main.post { toast("Processing failed: ${t.message}") }
         }
@@ -567,18 +587,71 @@ class MainActivity : ComponentActivity() {
             .apply()
     }
 
-    private fun today() = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
-
     private fun refreshRoll() {
-        val count = if (prefs.getString("rollDate", "") == today()) prefs.getInt("rollCount", 0) else 0
-        statusText.text = "ROLL %02d".format(count) + if (debug) " · DBG" else ""
+        val a = Rolls.active(this)
+        statusText.text = (if (a == null) "LOAD ROLL" else "%02d LEFT".format(a.left)) + if (debug) " · DBG" else ""
+        statusText.setTextColor(if (a == null) 0x80FFFFFF.toInt() else ORANGE)
     }
 
-    private fun bumpRoll() {
-        val t = today()
-        val count = (if (prefs.getString("rollDate", "") == t) prefs.getInt("rollCount", 0) else 0) + 1
-        prefs.edit().putString("rollDate", t).putInt("rollCount", count).apply()
+    // ---------- rolls ----------
+
+    private fun dialog() = android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+
+    private fun rollMenu() {
+        val a = Rolls.active(this)
+        if (a == null) {
+            val sizes = intArrayOf(36, 24, 12)
+            dialog().setTitle("Load a roll")
+                .setItems(sizes.map { "$it exposures" }.toTypedArray()) { _, i -> loadRoll(sizes[i]) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        } else {
+            dialog().setTitle("Roll · ${a.used}/${a.size} shot")
+                .setMessage("Photos stay hidden until developed. Send to the lab to finish early: it develops at 8:00 AM.")
+                .setPositiveButton("Send to lab") { _, _ -> confirmSendToLab() }
+                .setNeutralButton("Discard roll") { _, _ -> confirmDiscard() }
+                .setNegativeButton("Keep shooting", null)
+                .show()
+        }
+    }
+
+    private fun loadRoll(size: Int) {
+        Rolls.load(this, size)
         refreshRoll()
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun confirmSendToLab() {
+        dialog().setTitle("Send to lab?")
+            .setMessage("The roll is finished and develops at 8:00 AM. You can't add more photos to it.")
+            .setPositiveButton("Send") { _, _ -> Rolls.sendToLab(this); refreshRoll(); toast("Developing · ready 8:00 AM") }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun confirmDiscard() {
+        dialog().setTitle("Discard this roll?")
+            .setMessage("All photos on it will be deleted. This can't be undone.")
+            .setPositiveButton("Discard") { _, _ -> Rolls.discardActive(this); refreshRoll() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun rollFinishedDialog() {
+        val sizes = intArrayOf(36, 24, 12)
+        dialog().setTitle("Roll finished")
+            .setMessage("Developing · ready 8:00 AM. Load another roll?")
+            .setPositiveButton("Load 36") { _, _ -> loadRoll(36) }
+            .setNeutralButton("Other size") { _, _ ->
+                dialog().setTitle("Load a roll")
+                    .setItems(sizes.map { "$it exposures" }.toTypedArray()) { _, i -> loadRoll(sizes[i]) }
+                    .show()
+            }
+            .setNegativeButton("Not now", null)
+            .show()
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
