@@ -69,6 +69,11 @@
         </receiver>
 
         <activity
+            android:name=".LookLabActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
             android:name=".EditActivity"
             android:exported="false"
             android:screenOrientation="portrait" />

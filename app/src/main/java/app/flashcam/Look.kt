@@ -31,7 +31,6 @@ class Look {
     companion object {
         private const val WB_TARGET_R = 1.203f
         private const val WB_TARGET_B = 0.899f
-        private const val WB_STRENGTH = 0.6f
         private val NIGHT_TONE = intArrayOf(18, 22, 27, 32, 36, 41, 45, 48, 51, 54, 56, 58, 60, 61, 62, 63, 64, 65, 66, 67, 68, 70, 71, 72, 74, 75, 77, 79, 80, 82, 84, 86, 88, 89, 91, 93, 95, 97, 99, 101, 103, 106, 108, 111, 113, 116, 119, 122, 126, 129, 133, 137, 141, 145, 149, 153, 157, 161, 166, 170, 174, 178, 182, 186, 190, 194, 198, 202, 206, 210, 214, 219, 223, 227, 232, 236, 241, 245, 250, 255, 260, 265, 270, 276, 282, 288, 295, 301, 309, 316, 324, 333, 341, 350, 359, 368, 378, 387, 397, 406, 416, 425, 434, 443, 453, 462, 471, 480, 488, 497, 505, 513, 522, 529, 537, 544, 551, 558, 565, 572, 578, 584, 591, 596, 602, 608, 613, 619, 624, 629, 634, 638, 643, 648, 652, 656, 661, 665, 669, 673, 677, 680, 684, 688, 691, 694, 698, 701, 704, 707, 711, 714, 717, 720, 723, 727, 730, 733, 736, 739, 743, 746, 749, 752, 756, 759, 762, 766, 769, 772, 776, 779, 783, 786, 790, 794, 798, 802, 806, 810, 815, 820, 824, 829, 834, 839, 843, 848, 853, 858, 862, 867, 871, 875, 879, 882, 886, 889, 892, 895, 899, 902, 905, 907, 910, 913, 916, 919, 921, 924, 927, 929, 932, 934, 936, 939, 941, 943, 945, 947, 949, 951, 953, 955, 957, 959, 961, 963, 966, 968, 970, 973, 975, 978, 980, 982, 983, 985, 986, 987, 988, 989, 989, 990, 991, 991, 992, 993, 994, 994, 995, 996, 997, 997, 998, 999)
     }
 
@@ -48,6 +47,14 @@ class Look {
         val stars: Float = 0.45f,
         val glow: Float = 0.0f,
         val grain: Float = 0.065f,
+        // Look Lab adjustments (0 = built-in look)
+        val exposure: Float = 0f,     // EV
+        val warmth: Float = 0f,       // -1 cool .. +1 warm
+        val tint: Float = 0f,         // -1 green .. +1 magenta
+        val contrast: Float = 0f,     // -1 .. +1 on top of the curve
+        val fade: Float = 0f,         // 0 .. 0.15 lifted blacks
+        val grainSize: Float = 1f,    // 1 fine .. 3 coarse
+        val wbStrength: Float = 0.6f, // NIGHT auto white balance: 0 off .. 1 full
     ) {
         companion object {
             fun forMode(mode: Mode, drag: Boolean) = when (mode) {
@@ -70,7 +77,7 @@ class Look {
     private fun toSrgb(v: Float): Float { val c = v.coerceIn(0f, 1f); return if (c <= 0.0031308f) c * 12.92f else 1.055f * c.pow(1f / 2.4f) - 0.055f }
 
     /** Pulls each photo partway toward reference's mildly warm neutral, then applies the NIGHT tone curve. */
-    private fun nightLut(px: IntArray): Lut {
+    private fun nightLut(px: IntArray, p: Params): Lut {
         var sr = 0.0; var sg = 0.0; var sb = 0.0; var n = 0
         var i = 0
         while (i < px.size) {
@@ -84,11 +91,30 @@ class Look {
         var gr = 1f; var gb = 1f
         if (n > 300 && sg > 0) {
             val mr = (sr / sg).toFloat(); val mb = (sb / sg).toFloat()
-            gr = (WB_TARGET_R / mr).pow(WB_STRENGTH).coerceIn(0.6f, 1.7f)
-            gb = (WB_TARGET_B / mb).pow(WB_STRENGTH).coerceIn(0.6f, 1.7f)
+            gr = (WB_TARGET_R / mr).pow(p.wbStrength).coerceIn(0.6f, 1.7f)
+            gb = (WB_TARGET_B / mb).pow(p.wbStrength).coerceIn(0.6f, 1.7f)
         }
-        fun ch(gain: Float) = FloatArray(256) { v -> nightTone[(toSrgb(toLin[v] * gain) * 255f + 0.5f).toInt().coerceIn(0, 255)] }
-        return Lut(ch(gr), nightTone, ch(gb))
+        return composed(nightTone, nightTone, nightTone, gr, 1f, gb, p)
+    }
+
+    /**
+     * Final per-channel LUT: input gain in linear light (exposure, warmth, tint, auto-WB),
+     * then the mode's tone curve, then Look Lab contrast + fade.
+     */
+    private fun composed(tr: FloatArray, tg: FloatArray, tb: FloatArray, wr: Float, wg: Float, wb: Float, p: Params): Lut {
+        val e = 2f.pow(p.exposure)
+        val gR = wr * e * (1f + 0.15f * p.warmth) * (1f + 0.04f * p.tint)
+        val gG = wg * e * (1f - 0.10f * p.tint)
+        val gB = wb * e * (1f - 0.17f * p.warmth) * (1f + 0.04f * p.tint)
+        fun post(y: Float): Float {
+            val s = y * y * (3f - 2f * y)
+            val c = (y + (s - y) * p.contrast).coerceIn(0f, 1f)
+            return p.fade + c * (1f - p.fade)
+        }
+        fun ch(tone: FloatArray, gain: Float) = FloatArray(256) { v ->
+            post(tone[(toSrgb(toLin[v] * gain) * 255f + 0.5f).toInt().coerceIn(0, 255)])
+        }
+        return Lut(ch(tr, gR), ch(tg, gG), ch(tb, gB))
     }
     private val lutPm = buildLut(
         // DAY: tuned against 7 matched DAY pairs: deep blacks, punchy contrast, yellow-green greys
@@ -138,7 +164,7 @@ class Look {
             applyDrag(px, w, h, mask, rnd)
         }
         base.recycle()
-        val lut = if (p.mode == Mode.AM) nightLut(px) else lutPm
+        val lut = if (p.mode == Mode.AM) nightLut(px, p) else composed(lutPm.r, lutPm.g, lutPm.b, 1f, 1f, 1f, p)
 
         // 4-5. tone + saturation; keep pre-tone luma for highlight detection
         val n = w * h
@@ -184,6 +210,7 @@ class Look {
         // 8. grain + pack
         val out = IntArray(n)
         var state = rnd.nextLong() or 1L
+        val coarse = if (p.grainSize > 1.05f) coarseNoise(w, h, p.grainSize, rnd) else null
         for (i in 0 until n) {
             val hb = hal[i] * p.halation
             val hz = if (haze != null) haze[i] * p.glow else 0f
@@ -194,7 +221,7 @@ class Look {
             state = state xor (state shl 13); state = state xor (state ushr 7); state = state xor (state shl 17)
             val u1 = ((state ushr 40) and 0xFFFF).toFloat() / 65535f
             val u2 = ((state ushr 20) and 0xFFFF).toFloat() / 65535f
-            val noise = u1 + u2 - 1f
+            val noise = coarse?.get(i) ?: (u1 + u2 - 1f)
             val l = 0.299f * r + 0.587f * g + 0.114f * b
             val amp = p.grain * (1f - 0.65f * min(1f, abs(l - 0.40f) * 1.8f))
             r += noise * amp; g += noise * amp; b += noise * amp
@@ -205,6 +232,26 @@ class Look {
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(out, 0, w, 0, 0, w, h)
         return result
+    }
+
+    /** Clumpier grain: noise at a lower resolution, smoothly upscaled, re-scaled to keep the same strength. */
+    private fun coarseNoise(w: Int, h: Int, size: Float, rnd: Random): FloatArray {
+        val sw = max(2, (w / size).roundToInt()); val sh = max(2, (h / size).roundToInt())
+        val small = FloatArray(sw * sh) { rnd.nextFloat() + rnd.nextFloat() - 1f }
+        val out = FloatArray(w * h)
+        val boost = 0.6f + 0.4f * size
+        for (y in 0 until h) {
+            val fy = (y + 0.5f) * sh / h - 0.5f
+            val y0 = fy.toInt().coerceIn(0, sh - 1); val y1 = min(y0 + 1, sh - 1); val ty = (fy - y0).coerceIn(0f, 1f)
+            for (x in 0 until w) {
+                val fx = (x + 0.5f) * sw / w - 0.5f
+                val x0 = fx.toInt().coerceIn(0, sw - 1); val x1 = min(x0 + 1, sw - 1); val tx = (fx - x0).coerceIn(0f, 1f)
+                val a = mix(small[y0 * sw + x0], small[y0 * sw + x1], tx)
+                val b = mix(small[y1 * sw + x0], small[y1 * sw + x1], tx)
+                out[y * w + x] = mix(a, b, ty) * boost
+            }
+        }
+        return out
     }
 
     // ---------- crop ----------

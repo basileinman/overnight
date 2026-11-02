@@ -158,8 +158,8 @@ class MainActivity : ComponentActivity() {
 
         pmMode = SunClock.isDaytime()  // NIGHT/DAY follows the clock on launch
         far = prefs.getBoolean("far", false)
-        autoFocus = prefs.getBoolean("autoFocus", true)
-        torchFlash = false  // always launch with PULSE
+        autoFocus = true  // focus is always automatic now (with a fixed 4 ft fallback in the dark)
+        torchFlash = false  // TORCH is only an automatic fallback for phones without PULSE support
         burst = prefs.getBoolean("burst", false)
         drag = false  // BLUR always starts off
         front = prefs.getBoolean("front", false)
@@ -196,6 +196,11 @@ class MainActivity : ComponentActivity() {
             refreshUi()
         }
         flipBtn.setOnClickListener { if (!busy) { front = !front; save(); refreshUi(); reopen() } }
+        thumb.setOnLongClickListener {
+            if (debug) startActivity(Intent(this, LookLabActivity::class.java))
+            else toast("Look Lab: turn on debug first (hold the roll counter)")
+            true
+        }
         thumb.setOnClickListener {
             if (secureMode) {
                 // from the lock screen: unlock first, then show the roll
@@ -333,7 +338,7 @@ class MainActivity : ComponentActivity() {
         val rollSize = roll?.size ?: 0
         refreshRoll()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val params = Look.Params.forMode(if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
+        val params = LookSettings.params(this, if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
         val stripFrames: MutableList<Bitmap> = Collections.synchronizedList(ArrayList())
         captureNext(0, n, stamp, params, stripFrames, rollId, rollStart, rollSize)
     }
@@ -533,13 +538,13 @@ class MainActivity : ComponentActivity() {
 
         val fixedFocus = !pmMode && !front
         focusBtn.text = when { autoFocus -> "AUTO ˅"; far -> "FAR ˅"; else -> "CLOSE ˅" }
-        focusBtn.alpha = if (fixedFocus) 1f else 0.4f
-        focusBtn.isEnabled = fixedFocus
+        focusBtn.visibility = View.INVISIBLE  // manual CLOSE/FAR removed; AUTO only
+        focusBtn.isEnabled = false
         focusBtn.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
         focusReadout.text = focusText()
         focusReadout.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
 
-        flashBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
+        flashBtn.visibility = View.GONE
         flashBtn.text = if (torchFlash) "TORCH" else "PULSE"
         flashBtn.setTextColor(if (torchFlash) grey else ORANGE)
         burstBtn.text = if (burst) "BURST" else "SINGLE"
@@ -657,7 +662,7 @@ class MainActivity : ComponentActivity() {
         m.put("focus", when {
             engine.isFront -> "SELFIE"
             pmMode -> "AUTO"
-            autoFocus -> engine.subjectDistanceM()?.let { "AUTO · %.1f FT".format(it * 3.281f) } ?: "AUTO"
+            autoFocus -> engine.subjectDistanceM()?.let { "AUTO · %.1f FT".format(it * 3.281f) } ?: "AUTO · FIXED 4 FT (DARK)"
             far -> "FAR · 6 FT"
             else -> "CLOSE · 3 FT"
         })
@@ -683,7 +688,7 @@ class MainActivity : ComponentActivity() {
         autoFocus -> engine.subjectDistanceM()?.let { d ->
             val ft = d * 3.281f
             if (ft >= 10f) "10ft+" else "${Math.round(ft).coerceAtLeast(1)}ft"
-        } ?: "AUTO"
+        } ?: "~4ft"
         far -> "6ft"
         else -> "3ft"
     }

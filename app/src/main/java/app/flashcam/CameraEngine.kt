@@ -51,6 +51,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         const val PULSE_MAX_ISO = 800
         const val CLOSE_M = 0.91f                   // 3 ft
         const val FAR_M = 1.83f                     // 6 ft
+        const val FALLBACK_M = 1.22f                // 4 ft: disposable-style fixed focus when it's too dark for AF
         const val TORCH_SETTLE_MS = 300L
         // DRAG: slow shutter so lights streak, flash freezes the subject
         const val DRAG_EXPOSURE_NS = 200_000_000L  // 1/5 s
@@ -73,6 +74,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     @Volatile private var meteredExposure = 0L
     @Volatile private var meteredIso = 0
     @Volatile private var lastDiopters = 0f      // where continuous AF currently has the lens
+    @Volatile private var afLocked = false        // AF found something; false = too dark / hunting
     private var focusReliable = false
     private val meter = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
@@ -82,6 +84,8 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
                 meteredExposure = e
                 meteredIso = iso
                 result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastDiopters = it }
+                val st = result.get(CaptureResult.CONTROL_AF_STATE)
+                afLocked = st == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED || st == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
             }
         }
     }
@@ -254,7 +258,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     /** Subject distance in meters from the live autofocus, or null if unknown. */
     fun subjectDistanceM(): Float? {
         val d = lastDiopters
-        return if (focusReliable && d > 0.02f) 1f / d else null
+        return if (focusReliable && afLocked && d > 0.02f) 1f / d else null
     }
 
     /**
@@ -265,7 +269,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         val cfg = config ?: return 1.0
         if (isFront) return 1.0
         val d: Double = when {
-            cfg.autoFocus -> subjectDistanceM()?.toDouble() ?: return 1.0
+            cfg.autoFocus -> (subjectDistanceM() ?: FALLBACK_M).toDouble()
             cfg.far -> FAR_M.toDouble()
             else -> return 1.0
         }
@@ -352,9 +356,11 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     /** For capture requests: freeze focus where the live AF already is (no AF cycle), and minimal phone processing. */
     private fun captureTweaks(b: CaptureRequest.Builder) {
         val cfg = config ?: return
-        if (!cfg.pm && !isFront && cfg.autoFocus && minFocus > 0f && lastDiopters > 0f) {
+        if (!cfg.pm && !isFront && cfg.autoFocus && minFocus > 0f) {
+            // AF found the subject: freeze it there. Too dark to find it: fixed 4 ft like a disposable.
+            val d = if (afLocked && lastDiopters > 0f) lastDiopters else min(1f / FALLBACK_M, minFocus)
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
-            b.set(CaptureRequest.LENS_FOCUS_DISTANCE, lastDiopters)
+            b.set(CaptureRequest.LENS_FOCUS_DISTANCE, d)
         }
         val nr = chars?.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: IntArray(0)
         when {
