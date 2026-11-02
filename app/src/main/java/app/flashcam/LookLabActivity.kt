@@ -89,7 +89,7 @@ class LookLabActivity : ComponentActivity() {
             setOnTouchListener { _, e ->
                 when (e.actionMasked) {
                     MotionEvent.ACTION_DOWN -> { showingOriginal = true; source?.let { setImageBitmap(it) }; statusText.text = "ORIGINAL (UNPROCESSED)" }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { showingOriginal = false; render() }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { showingOriginal = false; updateStatus(); render() }
                 }
                 true
             }
@@ -209,7 +209,7 @@ class LookLabActivity : ComponentActivity() {
                         if (!fromUser) return
                         val v = k.min + (k.max - k.min) * prog / 1000f
                         params = k.set(params, v)
-                        value.text = k.fmt(v)
+                        value.text = valueText(k, v)
                         scheduleRender()
                     }
                     override fun onStartTrackingTouch(s: SeekBar) {}
@@ -225,14 +225,23 @@ class LookLabActivity : ComponentActivity() {
     }
 
     private fun syncSliders() {
-        val builtIn = LookSettings.builtIn(mode)
         for ((k, bar, value) in sliders) {
             val v = k.get(params)
             bar.progress = (((v - k.min) / (k.max - k.min)) * 1000f).toInt().coerceIn(0, 1000)
-            val changed = kotlin.math.abs(v - k.get(builtIn)) > 0.0005f
-            value.text = k.fmt(v) + if (changed) " •" else ""
+            value.text = valueText(k, v)
             (bar.parent as View).visibility = if (k.nightOnly && mode != Look.Mode.AM) View.GONE else View.VISIBLE
         }
+        updateStatus()
+    }
+
+    /** Value label, with a dot when it differs from the built-in look. */
+    private fun valueText(k: LookSettings.Knob, v: Float): String {
+        val changed = kotlin.math.abs(v - k.get(LookSettings.builtIn(mode))) > (k.max - k.min) * 0.004f
+        return k.fmt(v) + if (changed) " •" else ""
+    }
+
+    private fun updateStatus() {
+        if (source == null && originals.isEmpty()) return
         statusText.text = (if (mode == Look.Mode.AM) "NIGHT" else "DAY") + " · " +
             (if (LookSettings.isCustom(this, mode)) "USING YOUR SAVED LOOK" else "USING BUILT-IN LOOK") + " · • = CHANGED FROM BUILT-IN"
     }
