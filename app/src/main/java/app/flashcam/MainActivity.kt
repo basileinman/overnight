@@ -380,7 +380,7 @@ class MainActivity : ComponentActivity() {
                 try {
                     val frames = synchronized(stripFrames) { stripFrames.toList() }
                     val date = SimpleDateFormat("dd.MM.yy", Locale.US).format(Date())
-                    val strip = Strip.make(frames, "FLASHCAM  $date  ×${frames.size}")
+                    val strip = Strip.make(frames, "OVERNIGHT  $date  ×${frames.size}")
                     if (rollId != null) Rolls.saveFrame(this, rollId, strip, "FLASH_${stamp}_strip.jpg")
                     else saveJpeg(strip, "FLASH_${stamp}_strip.jpg")
                     strip.recycle()

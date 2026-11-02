@@ -1,4 +1,4 @@
-# FlashCam
+# Overnight
 
 A direct-flash, film-look camera for Android, made for nights out.
 

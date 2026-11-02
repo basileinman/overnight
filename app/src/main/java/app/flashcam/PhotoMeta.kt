@@ -37,7 +37,7 @@ object PhotoMeta {
             val ex = ExifInterface(file.absolutePath)
             ex.setAttribute(ExifInterface.TAG_MAKE, Build.MANUFACTURER)
             ex.setAttribute(ExifInterface.TAG_MODEL, Build.MODEL)
-            ex.setAttribute(ExifInterface.TAG_SOFTWARE, "FlashCam")
+            ex.setAttribute(ExifInterface.TAG_SOFTWARE, "Overnight")
             val t = meta.optLong("time", System.currentTimeMillis())
             val d = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(t))
             ex.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, d)
