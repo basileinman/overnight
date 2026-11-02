@@ -56,6 +56,8 @@ class MainActivity : ComponentActivity() {
         private const val SCREEN_FLASH_MS = 250L
         private const val MAX_PENDING = 3
         private const val AUTO_MODE_AFTER_MS = 30 * 60 * 1000L
+        private const val NIGHT_EV = 6.0   // dimmer than a lamp-lit room -> NIGHT
+        private const val DAY_EV = 8.0     // window-lit room or brighter -> DAY
     }
 
     private lateinit var root: View
@@ -86,7 +88,11 @@ class MainActivity : ComponentActivity() {
     private val pending = AtomicInteger(0)
 
     private var pmMode = false
-    private var far = false
+    private var far = false          // fixed FAR (when not AUTO)
+    private var autoFocus = true     // AUTO: focus + flash follow subject distance
+    private var secureMode = false   // opened from the lock screen
+    private var modeLocked = false   // user picked NIGHT/DAY by hand; auto switching paused
+    private var darkVotes = 0
     private var torchFlash = false
     private var burst = false
     private var drag = false       // fake BLUR effect
@@ -113,6 +119,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyLaunchMode(intent)
         setContentView(R.layout.activity_main)
         processExecutor = Executors.newSingleThreadExecutor()
 
@@ -151,6 +158,7 @@ class MainActivity : ComponentActivity() {
 
         pmMode = SunClock.isDaytime()  // NIGHT/DAY follows the clock on launch
         far = prefs.getBoolean("far", false)
+        autoFocus = prefs.getBoolean("autoFocus", true)
         torchFlash = false  // always launch with PULSE
         burst = prefs.getBoolean("burst", false)
         drag = false  // BLUR always starts off
@@ -161,8 +169,20 @@ class MainActivity : ComponentActivity() {
         refreshUi()
 
         setupViewfinderTouch()
-        modeBtn.setOnClickListener { if (!busy) { pmMode = !pmMode; save(); refreshUi(); reopen() } }
-        focusBtn.setOnClickListener { if (!busy) { far = !far; save(); refreshUi(); reopen() } }
+        modeBtn.setOnClickListener { if (!busy) { pmMode = !pmMode; modeLocked = true; save(); refreshUi(); engine.reconfigure(camConfig()) } }
+        modeBtn.setOnLongClickListener {
+            modeLocked = false; refreshUi(); toast("NIGHT / DAY back on auto"); true
+        }
+        focusBtn.setOnClickListener {
+            if (busy) return@setOnClickListener
+            // AUTO -> CLOSE -> FAR -> AUTO
+            when {
+                autoFocus -> { autoFocus = false; far = false }
+                !far -> far = true
+                else -> { far = false; autoFocus = true }
+            }
+            save(); refreshUi(); engine.reconfigure(camConfig())
+        }
         flashBtn.setOnClickListener { torchFlash = !torchFlash; save(); refreshUi() }
         burstBtn.setOnClickListener { burst = !burst; save(); refreshUi() }
         blurBtn.setOnClickListener {
@@ -176,7 +196,15 @@ class MainActivity : ComponentActivity() {
             refreshUi()
         }
         flipBtn.setOnClickListener { if (!busy) { front = !front; save(); refreshUi(); reopen() } }
-        thumb.setOnClickListener { startActivity(Intent(this, GalleryActivity::class.java)) }
+        thumb.setOnClickListener {
+            if (secureMode) {
+                // from the lock screen: unlock first, then show the roll
+                val km = getSystemService(android.app.KeyguardManager::class.java)
+                km?.requestDismissKeyguard(this, object : android.app.KeyguardManager.KeyguardDismissCallback() {
+                    override fun onDismissSucceeded() { startActivity(Intent(this@MainActivity, GalleryActivity::class.java)) }
+                })
+            } else startActivity(Intent(this, GalleryActivity::class.java))
+        }
         statusText.setOnClickListener { if (!busy) rollMenu() }
         statusText.setOnLongClickListener {
             debug = !debug; save(); refreshUi()
@@ -201,15 +229,30 @@ class MainActivity : ComponentActivity() {
         if (!hasPerms()) permLauncher.launch(neededPerms())
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        applyLaunchMode(intent)
+    }
+
+    private fun applyLaunchMode(i: Intent?) {
+        secureMode = i?.action == android.provider.MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA_SECURE
+        setShowWhenLocked(secureMode)
+        setTurnScreenOn(secureMode)
+        if (::thumb.isInitialized && secureMode) thumb.setImageDrawable(null)  // don't show the last photo on a locked phone
+    }
+
     override fun onResume() {
         super.onResume()
         // Back after a while (or first launch): re-pick NIGHT/DAY from the clock.
         // A manual switch sticks while you keep using the app.
         val away = System.currentTimeMillis() - prefs.getLong("pausedAt", 0L)
         if (away > AUTO_MODE_AFTER_MS) {
-            val day = SunClock.isDaytime()
+            modeLocked = false
+            val day = SunClock.isDaytime()   // first guess; the light meter takes over once the camera is up
             if (day != pmMode) { pmMode = day; refreshUi() }
         }
+        main.removeCallbacks(lightTick)
+        main.postDelayed(lightTick, 800)
         orientationListener.enable()
         if (texture.isAvailable) openCamera()
         processExecutor.execute {
@@ -217,7 +260,7 @@ class MainActivity : ComponentActivity() {
             main.post {
                 refreshRoll()
                 if (dev.isNotEmpty()) toast(if (dev.size == 1) "Your roll is developed" else "${dev.size} rolls developed")
-                loadLastThumb()
+                if (!secureMode) loadLastThumb()
             }
         }
     }
@@ -225,6 +268,7 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         prefs.edit().putLong("pausedAt", System.currentTimeMillis()).apply()
+        main.removeCallbacks(lightTick)
         orientationListener.disable()
         cameraReady = false
         engine.close()
@@ -253,7 +297,7 @@ class MainActivity : ComponentActivity() {
         if (!hasPerms() || !texture.isAvailable) return
         cameraReady = false
         engine.open(
-            CameraEngine.Config(front = front, pm = pmMode, far = far, ev = currentEv(), drag = realDrag),
+            camConfig(),
             onReady = { info ->
                 cameraReady = true
                 if (info.isFront != front) { front = info.isFront; refreshUi() }
@@ -411,7 +455,7 @@ class MainActivity : ComponentActivity() {
             val th = Bitmap.createScaledBitmap(out, 160, max(1, 160 * out.height / out.width), true)
             out.recycle()
             // roll shots stay hidden until developed
-            if (rollId == null) main.post { thumb.setImageBitmap(th) }
+            if (rollId == null) main.post { thumb.setImageBitmap(th) }  // shown even when locked: only what you just took
         } catch (t: Throwable) {
             main.post { toast("Processing failed: ${t.message}") }
         }
@@ -479,17 +523,20 @@ class MainActivity : ComponentActivity() {
         modeBtn.setTextColor(modeColor)
         modeBtn.compoundDrawableTintList = ColorStateList.valueOf(modeColor)
 
+        // small "A" when NIGHT/DAY is switching on its own; hold the button to return to auto
+        if (!modeLocked) {
+            val t = android.text.SpannableString(modeBtn.text.toString() + " A")
+            t.setSpan(android.text.style.RelativeSizeSpan(0.55f), t.length - 1, t.length, 0)
+            t.setSpan(android.text.style.SuperscriptSpan(), t.length - 1, t.length, 0)
+            modeBtn.text = t
+        }
+
         val fixedFocus = !pmMode && !front
-        focusBtn.text = if (far) "FAR ˅" else "CLOSE ˅"
+        focusBtn.text = when { autoFocus -> "AUTO ˅"; far -> "FAR ˅"; else -> "CLOSE ˅" }
         focusBtn.alpha = if (fixedFocus) 1f else 0.4f
         focusBtn.isEnabled = fixedFocus
         focusBtn.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
-        focusReadout.text = when {
-            front -> "SELFIE"
-            pmMode -> "AF"
-            far -> "6ft"
-            else -> "3ft"
-        }
+        focusReadout.text = focusText()
         focusReadout.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
 
         flashBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
@@ -591,6 +638,7 @@ class MainActivity : ComponentActivity() {
         prefs.edit()
             .putBoolean("pm", pmMode)
             .putBoolean("far", far)
+            .putBoolean("autoFocus", autoFocus)
             .putBoolean("burst", burst)
             .putBoolean("drag", drag)
             .putBoolean("front", front)
@@ -606,7 +654,13 @@ class MainActivity : ComponentActivity() {
         m.put("v", 1)
         m.put("time", System.currentTimeMillis())
         m.put("mode", if (pmMode) "DAY" else "NIGHT")
-        m.put("focus", when { engine.isFront -> "SELFIE"; pmMode -> "AUTO"; far -> "FAR · 6 FT"; else -> "CLOSE · 3 FT" })
+        m.put("focus", when {
+            engine.isFront -> "SELFIE"
+            pmMode -> "AUTO"
+            autoFocus -> engine.subjectDistanceM()?.let { "AUTO · %.1f FT".format(it * 3.281f) } ?: "AUTO"
+            far -> "FAR · 6 FT"
+            else -> "CLOSE · 3 FT"
+        })
         m.put("flash", kind.name.let { if (it == "NONE") "OFF" else it })
         m.put("effect", when { realDrag && kind == CameraEngine.Flash.PULSE -> "DRAG"; drag && !pmMode && !engine.isFront -> "BLUR"; else -> "NONE" })
         m.put("burstOf", n); m.put("burstIdx", i + 1)
@@ -617,6 +671,51 @@ class MainActivity : ComponentActivity() {
         m.put("phone", Build.MODEL)
         if (rollId != null) { m.put("rollFrame", rollStart + i); m.put("rollSize", rollSize) }
         return m
+    }
+
+    private fun camConfig() = CameraEngine.Config(
+        front = front, pm = pmMode, far = far, ev = currentEv(), drag = realDrag, autoFocus = autoFocus,
+    )
+
+    private fun focusText(): String = when {
+        front -> "SELFIE"
+        pmMode -> "AF"
+        autoFocus -> engine.subjectDistanceM()?.let { d ->
+            val ft = d * 3.281f
+            if (ft >= 10f) "10ft+" else "${Math.round(ft).coerceAtLeast(1)}ft"
+        } ?: "AUTO"
+        far -> "6ft"
+        else -> "3ft"
+    }
+
+    /**
+     * Every half second: refresh the live distance readout, and (unless locked by hand) switch
+     * NIGHT/DAY by how bright the scene actually is. Hysteresis + a few agreeing readings so it
+     * doesn't flip back and forth. Clock is only the starting guess.
+     */
+    private val lightTick = object : Runnable {
+        override fun run() {
+            if (cameraReady) {
+                if (autoFocus && !pmMode && !front) focusReadout.text = focusText()
+                val ev = engine.sceneEv()
+                if (!modeLocked && !busy && ev != null) {
+                    val wantNight = ev < NIGHT_EV
+                    val wantDay = ev > DAY_EV
+                    darkVotes = when {
+                        wantNight && pmMode -> darkVotes + 1
+                        wantDay && !pmMode -> darkVotes + 1
+                        else -> 0
+                    }
+                    if (darkVotes >= 4) {
+                        darkVotes = 0
+                        pmMode = !pmMode
+                        refreshUi()
+                        engine.reconfigure(camConfig())
+                    }
+                }
+            }
+            main.postDelayed(this, 500)
+        }
     }
 
     private fun refreshRoll() {

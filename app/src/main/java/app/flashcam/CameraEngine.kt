@@ -34,7 +34,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
 
     enum class Flash { PULSE, TORCH, SCREEN, NONE }
 
-    data class Config(val front: Boolean, val pm: Boolean, val far: Boolean, val ev: Float = 0f, val drag: Boolean = false)
+    data class Config(val front: Boolean, val pm: Boolean, val far: Boolean, val ev: Float = 0f, val drag: Boolean = false, val autoFocus: Boolean = false)
 
     data class Info(val isFront: Boolean, val hasFlash: Boolean, val manualSensor: Boolean)
 
@@ -72,6 +72,8 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     // latest auto-exposure reading from the live viewfinder
     @Volatile private var meteredExposure = 0L
     @Volatile private var meteredIso = 0
+    @Volatile private var lastDiopters = 0f      // where continuous AF currently has the lens
+    private var focusReliable = false
     private val meter = object : CameraCaptureSession.CaptureCallback() {
         override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, result: TotalCaptureResult) {
             val e = result.get(CaptureResult.SENSOR_EXPOSURE_TIME)
@@ -79,6 +81,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
             if (e != null && iso != null && e > 0 && iso > 0) {
                 meteredExposure = e
                 meteredIso = iso
+                result.get(CaptureResult.LENS_FOCUS_DISTANCE)?.let { lastDiopters = it }
             }
         }
     }
@@ -114,6 +117,9 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         hasFlash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
         minFocus = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
         fNumber = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull() ?: 0f
+        focusReliable = (c.get(CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION) ?: 0) !=
+            CameraMetadata.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_UNCALIBRATED
+        lastDiopters = 0f
         focalMm = c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
         focal35 = c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)?.let { sz ->
             val diag = Math.hypot(sz.width.toDouble(), sz.height.toDouble())
@@ -218,6 +224,8 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT)
         if (cfg.pm) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+        } else if (!isFront && minFocus > 0f && cfg.autoFocus) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
         } else if (!isFront && minFocus > 0f) {
             val diopters = min(1f / (if (cfg.far) FAR_M else CLOSE_M), minFocus)
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
@@ -243,6 +251,44 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     }
 
     /** Change exposure compensation live (DAY preview + pulse ISO for the next shot). */
+    /** Subject distance in meters from the live autofocus, or null if unknown. */
+    fun subjectDistanceM(): Float? {
+        val d = lastDiopters
+        return if (focusReliable && d > 0.02f) 1f / d else null
+    }
+
+    /**
+     * Flash light falls off with distance squared. CLOSE (~0.9 m) is the calibrated reference.
+     * Farther subjects get a brighter exposure (higher ISO cap), closer ones darker. Instant: no extra metering.
+     */
+    private fun flashDistanceFactor(): Double {
+        val cfg = config ?: return 1.0
+        if (isFront) return 1.0
+        val d: Double = when {
+            cfg.autoFocus -> subjectDistanceM()?.toDouble() ?: return 1.0
+            cfg.far -> FAR_M.toDouble()
+            else -> return 1.0
+        }
+        val f = (d.coerceIn(0.35, 3.5) / CLOSE_M)
+        return (f * f).coerceIn(0.25, 4.0)
+    }
+
+    /** Scene brightness (EV at ISO 100) from the live meter, corrected for exposure comp. Null until metered. */
+    fun sceneEv(): Double? {
+        val e = meteredExposure; val iso = meteredIso
+        if (e <= 0 || iso <= 0 || torchOn) return null
+        val n = if (fNumber > 0f) fNumber.toDouble() else 1.8
+        val t = e / 1e9
+        val ev = Math.log(n * n / t) / Math.log(2.0) - Math.log(iso / 100.0) / Math.log(2.0)
+        return ev + (config?.ev ?: 0f)
+    }
+
+    /** Swap NIGHT/DAY (or focus) without reopening the camera: no flicker. */
+    fun reconfigure(cfg: Config) {
+        config = cfg
+        handler?.post { if (!torchOn) startPreview() }
+    }
+
     fun setDrag(on: Boolean) {
         val cfg = config ?: return
         config = cfg.copy(drag = on)
@@ -303,11 +349,28 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     }
 
     /** Fixed exposure + single flash fire on this frame. No AE precapture, so it's instant. */
+    /** For capture requests: freeze focus where the live AF already is (no AF cycle), and minimal phone processing. */
+    private fun captureTweaks(b: CaptureRequest.Builder) {
+        val cfg = config ?: return
+        if (!cfg.pm && !isFront && cfg.autoFocus && minFocus > 0f && lastDiopters > 0f) {
+            b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
+            b.set(CaptureRequest.LENS_FOCUS_DISTANCE, lastDiopters)
+        }
+        val nr = chars?.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: IntArray(0)
+        when {
+            nr.contains(CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL) -> b.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL)
+            nr.contains(CameraMetadata.NOISE_REDUCTION_MODE_FAST) -> b.set(CaptureRequest.NOISE_REDUCTION_MODE, CameraMetadata.NOISE_REDUCTION_MODE_FAST)
+        }
+        val edge = chars?.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES) ?: IntArray(0)
+        if (edge.contains(CameraMetadata.EDGE_MODE_OFF)) b.set(CaptureRequest.EDGE_MODE, CameraMetadata.EDGE_MODE_OFF)
+    }
+
     private fun pulseRequest(cam: CameraDevice, rd: ImageReader): CaptureRequest {
         val b = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
         b.addTarget(rd.surface)
         previewSurface?.let { b.addTarget(it) }
         applyCommon(b)
+        captureTweaks(b)
         val expRange = chars?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         val isoRange = chars?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val minIso = isoRange?.lower ?: 50
@@ -322,7 +385,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
             exp = min(mExp, PULSE_MAX_EXPOSURE_NS)
             // exposure slider still nudges the cap so dark/far shots can be brightened
             val evScale = Math.pow(2.0, (config?.ev ?: 0f).toDouble().coerceAtLeast(0.0))
-            val isoCap = (PULSE_MAX_ISO * evScale).toInt()
+            val isoCap = (PULSE_MAX_ISO * evScale * flashDistanceFactor()).toInt()
             iso = (target / exp).roundToInt().coerceIn(minIso, isoCap)
             // very bright scenes: drop shutter time instead of going below base ISO
             if (iso == minIso && target / exp < minIso) exp = max(100_000L, (target / minIso).toLong())
@@ -357,6 +420,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         b.addTarget(rd.surface)
         lastExpNs = meteredExposure; lastIso = meteredIso  // auto exposure: closest reading we have
         applyCommon(b)
+        captureTweaks(b)
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
         b.set(CaptureRequest.FLASH_MODE, if (torch) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
         b.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
