@@ -353,9 +353,14 @@ class MainActivity : ComponentActivity() {
         val rotation = jpegRotation()
         val mirror = engine.isFront
 
+        val useDrag = realDrag && kind == CameraEngine.Flash.PULSE
         val take = {
-            engine.capture(kind) { bytes ->
-                val frame = bytes?.let { decode(it, rotation, mirror) }
+            engine.captureFrames(useDrag, kind) { bytes, amb ->
+                val frame = bytes?.let { b ->
+                    val f = decode(b, rotation, mirror)
+                    val a = amb?.let { decode(it, rotation, mirror) }
+                    if (f != null && a != null) look.dragComposite(f, a).also { f.recycle(); a.recycle() } else f
+                }
                 val meta = buildMeta(kind, i, n, rollId, rollStart, rollSize)
                 main.post {
                     if (kind == CameraEngine.Flash.SCREEN) hideScreenFlash()

@@ -345,6 +345,57 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         }
     }
 
+    /** One shot: plain capture, or the two-frame DRAG capture. */
+    fun captureFrames(drag: Boolean, flash: Flash, cb: (ByteArray?, ByteArray?) -> Unit) {
+        if (drag) captureDrag(cb) else capture(flash) { cb(it, null) }
+    }
+
+    /**
+     * DRAG: phones keep the LED on for a whole long exposure (over-lighting the subject), so instead:
+     * frame 1 = normal instant PULSE (subject frozen), frame 2 = 1/5 s with no flash (light trails).
+     * The app blends them. Callback gets (pulse, ambient); ambient may be null if it failed.
+     */
+    fun captureDrag(onJpegs: (ByteArray?, ByteArray?) -> Unit) {
+        val h = handler ?: run { onJpegs(null, null); return }
+        h.post {
+            val s = session; val cam = device; val rd = reader
+            if (s == null || cam == null || rd == null) { onJpegs(null, null); return@post }
+            pending = { first ->
+                if (first == null) onJpegs(null, null)
+                else {
+                    pending = { second -> onJpegs(first, second) }
+                    try { s.capture(ambientRequest(cam, rd), null, h) } catch (t: Throwable) { fail() }
+                }
+            }
+            try { s.capture(pulseRequest(cam, rd), null, h) } catch (t: Throwable) { fail() }
+        }
+    }
+
+    /** Long no-flash exposure for DRAG trails: about the room's metered brightness, spread over 1/5 s. */
+    private fun ambientRequest(cam: CameraDevice, rd: ImageReader): CaptureRequest {
+        val b = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+        b.addTarget(rd.surface)
+        applyCommon(b)
+        captureTweaks(b)
+        val isoRange = chars?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        val expRange = chars?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+        val minIso = isoRange?.lower ?: 50
+        val target = if (meteredExposure > 0 && meteredIso > 0) meteredExposure.toDouble() * meteredIso else 33_000_000.0 * 800
+        var exp = DRAG_EXPOSURE_NS
+        var iso = (target * 0.7 / exp).roundToInt().coerceIn(minIso, DRAG_MAX_ISO)
+        expRange?.let { exp = exp.coerceIn(it.lower, it.upper) }
+        isoRange?.let { iso = iso.coerceIn(it.lower, it.upper) }
+        b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
+        b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exp)
+        b.set(CaptureRequest.SENSOR_SENSITIVITY, iso)
+        b.set(CaptureRequest.SENSOR_FRAME_DURATION, exp)
+        b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
+        b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+        b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF)
+        b.set(CaptureRequest.JPEG_QUALITY, 92.toByte())
+        return b.build()
+    }
+
     private fun fail() {
         if (torchOn) setTorch(false)
         val cb = pending
@@ -399,12 +450,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
             exp = PULSE_EXPOSURE_NS
             iso = (PULSE_ISO * Math.pow(2.0, (config?.ev ?: 0f).toDouble())).toInt()
         }
-        if (config?.drag == true) {
-            // keep the room's overall brightness about the same, but over a long shutter
-            val target = if (mExp > 0 && mIso > 0) mExp.toDouble() * mIso else exp.toDouble() * iso
-            exp = DRAG_EXPOSURE_NS
-            iso = (target / exp).roundToInt().coerceIn(minIso, DRAG_MAX_ISO)
-        }
         expRange?.let { exp = exp.coerceIn(it.lower, it.upper) }
         isoRange?.let { iso = iso.coerceIn(it.lower, it.upper) }
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_OFF)
@@ -413,10 +458,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         lastExpNs = exp; lastIso = iso
         b.set(CaptureRequest.SENSOR_FRAME_DURATION, max(exp, 33_333_333L))
         b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_SINGLE)
-        if (config?.drag == true) {
-            b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
-            b.set(CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE, CameraMetadata.LENS_OPTICAL_STABILIZATION_MODE_OFF)
-        }
         b.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
         return b.build()
     }

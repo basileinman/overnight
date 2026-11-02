@@ -254,6 +254,29 @@ class Look {
         return out
     }
 
+    /**
+     * DRAG composite: "screen" blend in linear light of the flash frame and the long ambient frame.
+     * Light adds like a double exposure but can't blow past white.
+     */
+    fun dragComposite(flash: Bitmap, amb: Bitmap): Bitmap {
+        val w = flash.width; val h = flash.height
+        val a = if (amb.width == w && amb.height == h) amb else Bitmap.createScaledBitmap(amb, w, h, true)
+        val pf = IntArray(w * h); val pa = IntArray(w * h)
+        flash.getPixels(pf, 0, w, 0, 0, w, h); a.getPixels(pa, 0, w, 0, 0, w, h)
+        if (a !== amb) a.recycle()
+        for (i in pf.indices) {
+            val f = pf[i]; val g = pa[i]
+            fun ch(sh: Int): Int {
+                val x = toLin[(f shr sh) and 255]; val y = toLin[(g shr sh) and 255]
+                return (toSrgb(1f - (1f - x) * (1f - y)) * 255f + 0.5f).toInt().coerceIn(0, 255)
+            }
+            pf[i] = (0xFF shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+        }
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(pf, 0, w, 0, 0, w, h)
+        return out
+    }
+
     // ---------- crop ----------
 
     private fun cropTo2x3(src: Bitmap): Bitmap {
