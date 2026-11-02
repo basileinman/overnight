@@ -277,6 +277,42 @@ class Look {
         return out
     }
 
+    /**
+     * Film-style double exposure: both frames added as light in linear space, each about -0.7 EV,
+     * so dark areas of one let the other show through and brights blow out together.
+     * Frame b is center-cropped/scaled to match a (e.g. after switching cameras).
+     */
+    fun doubleExposure(a: Bitmap, b0: Bitmap): Bitmap {
+        val w = a.width; val h = a.height
+        val b = fitTo(b0, w, h)
+        val pa = IntArray(w * h); val pb = IntArray(w * h)
+        a.getPixels(pa, 0, w, 0, 0, w, h); b.getPixels(pb, 0, w, 0, 0, w, h)
+        if (b !== b0) b.recycle()
+        val k = 0.62f
+        for (i in pa.indices) {
+            val x = pa[i]; val y = pb[i]
+            fun ch(sh: Int): Int {
+                val v = (toLin[(x shr sh) and 255] + toLin[(y shr sh) and 255]) * k
+                return (toSrgb(v) * 255f + 0.5f).toInt().coerceIn(0, 255)
+            }
+            pa[i] = (0xFF shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+        }
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(pa, 0, w, 0, 0, w, h)
+        return out
+    }
+
+    private fun fitTo(src: Bitmap, w: Int, h: Int): Bitmap {
+        if (src.width == w && src.height == h) return src
+        val target = w.toFloat() / h
+        var cw = src.width; var ch = src.height
+        if (cw.toFloat() / ch > target) cw = (ch * target).roundToInt() else ch = (cw / target).roundToInt()
+        val crop = Bitmap.createBitmap(src, (src.width - cw) / 2, (src.height - ch) / 2, cw, ch)
+        val out = Bitmap.createScaledBitmap(crop, w, h, true)
+        if (crop !== src && crop !== out) crop.recycle()
+        return out
+    }
+
     // ---------- crop ----------
 
     private fun cropTo2x3(src: Bitmap): Bitmap {

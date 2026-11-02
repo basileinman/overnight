@@ -95,7 +95,7 @@ object PhotoMeta {
         add("FLASH", m.optString("flash"))
         add("EFFECT", m.optString("effect"))
         val n = m.optInt("burstOf", 1)
-        add("SHOT", if (n > 1) "BURST ${m.optInt("burstIdx", 1)}/$n" else "SINGLE")
+        add("SHOT", when { m.optBoolean("double") -> "DOUBLE EXPOSURE"; n > 1 -> "BURST ${m.optInt("burstIdx", 1)}/$n"; else -> "SINGLE" })
         val exp = m.optLong("expNs", 0L)
         if (exp > 0) add("SHUTTER", if (exp >= 500_000_000L) "%.1fs".format(exp / 1e9) else "1/${(1e9 / exp).roundToInt()}")
         if (m.optInt("iso", 0) > 0) add("ISO", m.optInt("iso").toString())

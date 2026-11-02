@@ -97,6 +97,14 @@
                     android:textStyle="bold" />
             </LinearLayout>
 
+            <ImageView
+                android:id="@+id/ghost"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:alpha="0.35"
+                android:scaleType="centerCrop"
+                android:visibility="gone" />
+
             <TextView
                 android:id="@+id/counter"
                 android:layout_width="wrap_content"

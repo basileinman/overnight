@@ -95,6 +95,10 @@ class MainActivity : ComponentActivity() {
     private var darkVotes = 0
     private var torchFlash = false
     private var burst = false
+    private var double = false        // DOUBLE exposure mode (two taps, one frame)
+    private var firstExposure: Bitmap? = null
+    private var firstMeta: org.json.JSONObject? = null
+    private lateinit var ghost: ImageView
     private var drag = false       // fake BLUR effect
     private var realDrag = false   // slow shutter + flash
     private var front = false
@@ -136,6 +140,7 @@ class MainActivity : ComponentActivity() {
         blurBtn = findViewById(R.id.blurBtn)
         flipBtn = findViewById(R.id.flipBtn)
         thumb = findViewById(R.id.thumb)
+        ghost = findViewById(R.id.ghost)
         focusReadout = findViewById(R.id.focusReadout)
         evRuler = findViewById(R.id.evRuler)
         evBox = findViewById(R.id.evBox)
@@ -161,6 +166,7 @@ class MainActivity : ComponentActivity() {
         autoFocus = true  // focus is always automatic now (with a fixed 4 ft fallback in the dark)
         torchFlash = false  // TORCH is only an automatic fallback for phones without PULSE support
         burst = prefs.getBoolean("burst", false)
+        double = prefs.getBoolean("double", false) && !burst
         drag = false  // BLUR always starts off
         front = prefs.getBoolean("front", false)
         debug = prefs.getBoolean("debug", false)
@@ -184,7 +190,16 @@ class MainActivity : ComponentActivity() {
             save(); refreshUi(); engine.reconfigure(camConfig())
         }
         flashBtn.setOnClickListener { torchFlash = !torchFlash; save(); refreshUi() }
-        burstBtn.setOnClickListener { burst = !burst; save(); refreshUi() }
+        burstBtn.setOnClickListener {
+            // SINGLE -> BURST -> DOUBLE -> SINGLE
+            when {
+                double -> { double = false; cancelDouble() }
+                burst -> { burst = false; double = true }
+                else -> burst = true
+            }
+            save(); refreshUi()
+        }
+        counterText.setOnClickListener { if (firstExposure != null) { cancelDouble(); toast("Double exposure cancelled") } }
         blurBtn.setOnClickListener {
             // OFF -> BLUR (effect) -> DRAG (real slow shutter + flash) -> OFF
             when {
@@ -327,6 +342,7 @@ class MainActivity : ComponentActivity() {
     // ---------- shooting ----------
 
     private fun shoot() {
+        if (double) { shootDouble(); return }
         if (!cameraReady || busy || pending.get() >= MAX_PENDING) return
         busy = true
         texture.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -389,6 +405,89 @@ class MainActivity : ComponentActivity() {
         } else {
             take()
         }
+    }
+
+    // ---------- double exposure ----------
+
+    /**
+     * Two taps, one frame. Exposure 1 is held (with a ghost on the viewfinder); exposure 2 lands on top.
+     * The two are added as light, each pulled down ~0.7 EV like a film shooter would, then developed once.
+     */
+    private fun shootDouble() {
+        if (!cameraReady || busy || pending.get() >= MAX_PENDING) return
+        val roll = Rolls.active(this)
+        if (roll != null && roll.left <= 0) { rollMenu(); return }
+        busy = true
+        texture.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        val kind = flashKind()
+        val rotation = jpegRotation()
+        val mirror = engine.isFront
+        val useDrag = realDrag && kind == CameraEngine.Flash.PULSE
+        val take = {
+            engine.captureFrames(useDrag, kind) { bytes, amb ->
+                val frame = bytes?.let { b ->
+                    val f = decode(b, rotation, mirror)
+                    val a = amb?.let { decode(it, rotation, mirror) }
+                    if (f != null && a != null) look.dragComposite(f, a).also { f.recycle(); a.recycle() } else f
+                }
+                val first = firstExposure == null
+                val meta = if (first) buildMeta(kind, 0, 1, null, 0, 0) else null
+                main.post {
+                    if (kind == CameraEngine.Flash.SCREEN) hideScreenFlash()
+                    busy = false
+                    if (frame == null) { toast("Capture failed"); return@post }
+                    if (first) {
+                        firstExposure = frame
+                        firstMeta = meta
+                        ghost.setImageBitmap(frame)
+                        ghost.visibility = View.VISIBLE
+                        counterText.visibility = View.VISIBLE
+                        counterText.text = "1/2 · TAP AGAIN  ✕"
+                    } else {
+                        val a = firstExposure!!
+                        val m = firstMeta
+                        firstExposure = null; firstMeta = null
+                        ghost.setImageDrawable(null); ghost.visibility = View.GONE
+                        counterText.visibility = View.GONE
+                        finishDouble(a, frame, m)
+                    }
+                }
+            }
+        }
+        if (kind == CameraEngine.Flash.SCREEN) { showScreenFlash(); main.postDelayed({ take() }, SCREEN_FLASH_MS) } else take()
+    }
+
+    private fun finishDouble(a: Bitmap, b: Bitmap, meta: org.json.JSONObject?) {
+        val roll = Rolls.active(this)
+        val rollId = roll?.id
+        val rollStart = (roll?.used ?: 0) + 1
+        if (roll != null && Rolls.reserve(this, 1) == 0) { a.recycle(); b.recycle(); rollMenu(); return }
+        refreshRoll()
+        meta?.put("double", true)
+        if (rollId != null) { meta?.put("rollFrame", rollStart); meta?.put("rollSize", roll.size) }
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val params = LookSettings.params(this, if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
+        pending.incrementAndGet()
+        processExecutor.execute {
+            try {
+                val merged = look.doubleExposure(a, b)
+                a.recycle(); b.recycle()
+                processAndSave(merged, stamp, 0, 1, params, Collections.synchronizedList(ArrayList()), rollId, meta)
+            } catch (t: Throwable) {
+                main.post { toast("Double exposure failed: ${t.message}") }
+            } finally { pending.decrementAndGet() }
+            main.post {
+                val r = Rolls.active(this)
+                if (rollId != null && r != null && r.id == rollId && r.left <= 0) { Rolls.sendToLab(this); refreshRoll(); rollFinishedDialog() }
+            }
+        }
+    }
+
+    private fun cancelDouble() {
+        firstExposure?.recycle()
+        firstExposure = null; firstMeta = null
+        if (::ghost.isInitialized) { ghost.setImageDrawable(null); ghost.visibility = View.GONE }
+        counterText.visibility = View.GONE
     }
 
     private fun jpegRotation(): Int {
@@ -552,8 +651,8 @@ class MainActivity : ComponentActivity() {
         flashBtn.visibility = View.GONE
         flashBtn.text = if (torchFlash) "TORCH" else "PULSE"
         flashBtn.setTextColor(if (torchFlash) grey else ORANGE)
-        burstBtn.text = if (burst) "BURST" else "SINGLE"
-        burstBtn.setTextColor(if (burst) ORANGE else grey)
+        burstBtn.text = when { double -> "DOUBLE"; burst -> "BURST"; else -> "SINGLE" }
+        burstBtn.setTextColor(if (burst || double) ORANGE else grey)
         blurBtn.text = if (realDrag) "DRAG" else "BLUR"
         blurBtn.setTextColor(if (drag || realDrag) ORANGE else grey)
         blurBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
@@ -564,7 +663,7 @@ class MainActivity : ComponentActivity() {
             setColor(if (on) 0x14FF7A1F else 0x00000000)
         }
         flashBtn.background = pill(!torchFlash)
-        burstBtn.background = pill(burst)
+        burstBtn.background = pill(burst || double)
         blurBtn.background = pill(drag || realDrag)
         refreshRoll()
     }
@@ -650,6 +749,7 @@ class MainActivity : ComponentActivity() {
             .putBoolean("far", far)
             .putBoolean("autoFocus", autoFocus)
             .putBoolean("burst", burst)
+            .putBoolean("double", double)
             .putBoolean("drag", drag)
             .putBoolean("front", front)
             .putBoolean("debug", debug)
