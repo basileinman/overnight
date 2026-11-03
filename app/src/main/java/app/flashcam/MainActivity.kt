@@ -710,23 +710,36 @@ class MainActivity : ComponentActivity() {
         thumbBadge.visibility = View.VISIBLE
     }
 
-    /** Tiny frame -> heavy blur -> color negative (inverted, orange film base, a bit dark). */
+    /**
+     * Tiny frame -> heavy blur -> color negative (mostly a plain inversion, just a hint of film-base warmth).
+     * Made square with rounded corners baked in, and blurred past the edges, so no hard edges show in the thumbnail.
+     */
     private fun latentImage(src: Bitmap): Bitmap {
-        val w = src.width; val h = src.height
-        val tiny = Bitmap.createScaledBitmap(src, 10, max(1, 10 * h / w), true)
-        val mid = Bitmap.createScaledBitmap(tiny, 40, max(1, 40 * h / w), true)
-        val soft = Bitmap.createScaledBitmap(mid, w, h, true)
-        tiny.recycle(); mid.recycle()
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val side = min(src.width, src.height)
+        val sq = Bitmap.createBitmap(src, (src.width - side) / 2, (src.height - side) / 2, side, side)
+        val tiny = Bitmap.createScaledBitmap(sq, 8, 8, true)
+        if (sq !== src) sq.recycle()
+        val size = 160
+        val out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(out)
         val cm = android.graphics.ColorMatrix(floatArrayOf(
-            -0.80f, 0f, 0f, 0f, 235f,
-            0f, -0.62f, 0f, 0f, 150f,
-            0f, 0f, -0.42f, 0f, 85f,
+            -0.92f, 0f, 0f, 0f, 240f,
+            0f, -0.92f, 0f, 0f, 232f,
+            0f, 0f, -0.92f, 0f, 222f,
             0f, 0f, 0f, 1f, 0f,
         ))
-        val p = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply { colorFilter = android.graphics.ColorMatrixColorFilter(cm) }
-        android.graphics.Canvas(out).drawBitmap(soft, 0f, 0f, p)
-        soft.recycle()
+        val p = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG or android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            colorFilter = android.graphics.ColorMatrixColorFilter(cm)
+        }
+        // match the thumbnail frame's rounded corners
+        val r = size * 16.5f / 53f
+        c.clipPath(android.graphics.Path().apply { addRoundRect(0f, 0f, size.toFloat(), size.toFloat(), r, r, android.graphics.Path.Direction.CW) })
+        // two upscale passes for a smooth blur; drawn larger than the frame so the soft edges fall outside it
+        val mid = Bitmap.createScaledBitmap(tiny, 32, 32, true)
+        tiny.recycle()
+        val over = size * 0.18f
+        c.drawBitmap(mid, null, android.graphics.RectF(-over, -over, size + over, size + over), p)
+        mid.recycle()
         return out
     }
 
