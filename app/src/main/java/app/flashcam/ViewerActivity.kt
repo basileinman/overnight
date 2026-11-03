@@ -43,15 +43,20 @@ class ViewerActivity : ComponentActivity() {
     private lateinit var evBox: TextView
     private var holdEv = 0f
 
+    private val LOOP_MS = 130
+    private lateinit var gifBtn: TextView
     private var looping = false
     private var loopFrames: List<Bitmap> = emptyList()
     private var loopIdx = 0
     private val loopTick = object : Runnable {
         override fun run() {
             if (!looping || loopFrames.isEmpty()) return
-            currentImage()?.setImageBitmap(loopFrames[loopIdx % loopFrames.size])
+            val f = loopFrames[loopIdx % loopFrames.size]
+            // first frame refits the view; after that swap pixels only, so zoom and position hold
+            if (loopIdx == 0) currentImage()?.setImageBitmap(f)
+            else currentImage()?.setImageDrawable(android.graphics.drawable.BitmapDrawable(resources, f))
             loopIdx++
-            main.postDelayed(this, 170)
+            main.postDelayed(this, LOOP_MS.toLong())
         }
     }
 
@@ -117,11 +122,20 @@ class ViewerActivity : ComponentActivity() {
 
         // bottom: SHARE   ♥   DELETE   (+ LOOP for bursts)
         val bottomCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
-        loopBtn = label("▶ LOOP", Color.WHITE).apply {
+        loopBtn = label("▶ PLAY", Color.WHITE).apply {
             setPadding(dp(16), dp(8), dp(16), dp(8))
             setOnClickListener { if (looping) stopLoop() else startLoop() }
-            visibility = View.GONE
         }
+        gifBtn = label("SAVE GIF", Ui.DIM).apply {
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener { exportGif() }
+        }
+        val burstRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER
+            visibility = View.GONE
+            addView(loopBtn); addView(gifBtn)
+        }
+        burstControls = burstRow
         val bottom = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(22), dp(18), dp(22), dp(18))
@@ -156,7 +170,7 @@ class ViewerActivity : ComponentActivity() {
             visibility = View.GONE
         }
         bottomCol.addView(infoPanel, LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(14), 0, dp(14), dp(8)) })
-        bottomCol.addView(loopBtn)
+        bottomCol.addView(burstRow)
         bottomCol.addView(bottom, LinearLayout.LayoutParams(-1, -2))
         root.addView(bottomCol, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
         bottomBar = bottomCol
@@ -229,8 +243,8 @@ class ViewerActivity : ComponentActivity() {
         val fav = Roll.isFavorite(this, p.id)
         heart.text = if (fav) "♥" else "♡"
         heart.setTextColor(if (fav) ORANGE else Color.WHITE)
-        loopBtn.visibility = if (p.burstKey != null) View.VISIBLE else View.GONE
-        loopBtn.text = if (looping) "■ STOP" else "▶ LOOP"
+        burstControls?.visibility = if (p.burstKey != null) View.VISIBLE else View.GONE
+        loopBtn.text = if (looping) "■ STOP" else "▶ PLAY"
         infoBtn.setTextColor(if (showInfo) ORANGE else Color.WHITE)
         if (showInfo) loadInfo(p) else infoPanel.visibility = View.GONE
     }
@@ -312,14 +326,23 @@ class ViewerActivity : ComponentActivity() {
 
     // ---------- burst loop (flipbook of the 5 frames) ----------
 
+    private var burstControls: View? = null
+
+    private fun burstFrames(): List<Roll.Photo> {
+        val key = current()?.burstKey ?: return emptyList()
+        return photos.filter { it.burstKey == key }.sortedBy { it.name }
+    }
+
+    /** 1-2-3-4-5-4-3-2: plays back and forth so the loop has no jump. */
+    private fun <T> boomerang(l: List<T>) = if (l.size < 3) l else l + l.subList(1, l.size - 1).reversed()
+
     private fun startLoop() {
-        val key = current()?.burstKey ?: return
-        val frames = photos.filter { it.burstKey == key }.sortedBy { it.name }
+        val frames = burstFrames()
         if (frames.size < 2) return
         looping = true; updateBars()
         val edge = resources.displayMetrics.heightPixels
         loader.execute {
-            val bmps = frames.mapNotNull { Roll.decodeSampled(this, it.uri, edge) }
+            val bmps = boomerang(frames.mapNotNull { Roll.decodeSampled(this, it.uri, edge) })
             main.post {
                 if (!looping) return@post
                 loopFrames = bmps; loopIdx = 0
@@ -336,6 +359,57 @@ class ViewerActivity : ComponentActivity() {
         updateBars()
         adapter.notifyItemChanged(pager.currentItem)  // restore the still frame
     }
+
+    private var exporting = false
+
+    /** Burst -> looping GIF saved to Pictures/Overnight/GIFs, then offer to share it. */
+    private fun exportGif() {
+        val frames = burstFrames()
+        if (frames.size < 2 || exporting) return
+        exporting = true
+        gifBtn.text = "SAVING…"
+        loader.execute {
+            val uri = try {
+                val bmps = frames.mapNotNull { Roll.decodeSampled(this, it.uri, 900) }
+                val w = 540
+                val h = bmps.first().let { w * it.height / it.width }
+                val scaled = bmps.map { b -> Bitmap.createScaledBitmap(b, w, h, true).also { if (it !== b) b.recycle() } }
+                val bytes = java.io.ByteArrayOutputStream().also { GifEncoder.encode(boomerang(scaled), LOOP_MS, it) }.toByteArray()
+                scaled.forEach { it.recycle() }
+                saveGif(bytes, "OVERNIGHT_${current()?.burstKey ?: System.currentTimeMillis()}.gif")
+            } catch (t: Throwable) { null }
+            main.post {
+                exporting = false
+                gifBtn.text = "SAVE GIF"
+                if (uri == null) { toast("Couldn't make the GIF"); return@post }
+                FlashDialog.show(this, "GIF saved", "In Pictures/Overnight/GIFs.",
+                    listOf(FlashDialog.Option("Share", FlashDialog.Style.PRIMARY) {
+                        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("image/gif")
+                            .putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "Share GIF"))
+                    }), cancel = "DONE")
+            }
+        }
+    }
+
+    private fun saveGif(bytes: ByteArray, name: String): android.net.Uri? {
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+            put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/gif")
+            if (android.os.Build.VERSION.SDK_INT >= 29) put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, Paths.GIFS_REL)
+            else {
+                @Suppress("DEPRECATION")
+                val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES), Paths.GIFS)
+                dir.mkdirs()
+                @Suppress("DEPRECATION")
+                put(android.provider.MediaStore.Images.Media.DATA, java.io.File(dir, name).absolutePath)
+            }
+        }
+        val uri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+        return uri
+    }
+
+    private fun toast(s: String) = android.widget.Toast.makeText(this, s, android.widget.Toast.LENGTH_SHORT).show()
 
     private fun label(text: String, color: Int) = Ui.text(this, text, Ui.scaled(15f), color)
 

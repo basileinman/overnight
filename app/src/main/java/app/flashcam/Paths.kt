@@ -11,6 +11,7 @@ object Paths {
     const val ORIGINALS = "Overnight/Originals"  // Pictures/Overnight/Originals (debug)
     const val ROLL_REL = "Pictures/Overnight/"
     const val ORIGINALS_REL = "Pictures/Overnight/Originals/"
+    const val GIFS = "Overnight/GIFs"; const val GIFS_REL = "Pictures/Overnight/GIFs/"
 
     private const val OLD_ROLL_REL = "Pictures/FlashCam/"
     private const val OLD_ORIG_REL = "Pictures/FlashCam/Originals/"

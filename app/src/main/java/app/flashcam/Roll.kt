@@ -35,8 +35,8 @@ object Roll {
         } else {
             @Suppress("DEPRECATION")
             val data = MediaStore.Images.Media.DATA
-            selection = "$data LIKE ? AND $data NOT LIKE ?"
-            args = arrayOf("%/Pictures/Overnight/%", "%/Originals/%")
+            selection = "$data LIKE ? AND $data NOT LIKE ? AND $data NOT LIKE ?"
+            args = arrayOf("%/Pictures/Overnight/%", "%/Originals/%", "%/GIFs/%")
         }
         val sort = "${MediaStore.Images.Media.DATE_ADDED} ASC, ${MediaStore.Images.Media._ID} ASC"
         val out = ArrayList<Photo>()

@@ -123,6 +123,8 @@ object Settings {
         choices(listOf("SAVE ORIGINALS", "OFF"), if (debug(ctx)) 0 else 1) { setDebug(ctx, it == 0) }
         note("Saves each unprocessed frame to Pictures/Overnight/Originals for tuning the look.")
         action("LOOK LAB") { d.dismiss(); ctx.startActivity(Intent(ctx, LookLabActivity::class.java)) }
+        action("PHONE REPORT") { showReport(act) }
+        note("What this phone's camera supports. Send it to me if a friend's phone acts up.")
 
         section("APP")
         action("SHOW INTRO AGAIN") {
@@ -143,6 +145,73 @@ object Settings {
             setDimAmount(0.7f)
         }
         d.show()
+    }
+
+    // ---------- phone report ----------
+
+    /** Plain-text summary of what matters for Overnight on this phone: instant flash, manual exposure, focus. */
+    fun report(ctx: Context): String {
+        val sb = StringBuilder()
+        sb.append("Overnight v${versionName(ctx)}\n")
+        sb.append("${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} (SDK ${android.os.Build.VERSION.SDK_INT})\n")
+        try {
+            val m = ctx.getSystemService(android.hardware.camera2.CameraManager::class.java)
+            val CC = android.hardware.camera2.CameraCharacteristics::class.java
+            val id = m.cameraIdList.firstOrNull {
+                m.getCameraCharacteristics(it).get(android.hardware.camera2.CameraCharacteristics.LENS_FACING) ==
+                    android.hardware.camera2.CameraMetadata.LENS_FACING_BACK
+            } ?: m.cameraIdList.firstOrNull()
+            if (id == null) { sb.append("No camera found\n"); return sb.toString() }
+            val c = m.getCameraCharacteristics(id)
+            val K = android.hardware.camera2.CameraCharacteristics::class.java
+            fun yn(b: Boolean) = if (b) "yes" else "NO"
+            val level = when (c.get(android.hardware.camera2.CameraCharacteristics.INFO_SUPPORTED_HARDWARE_LEVEL)) {
+                0 -> "LIMITED"; 1 -> "FULL"; 2 -> "LEGACY"; 3 -> "LEVEL_3"; 4 -> "EXTERNAL"; else -> "?"
+            }
+            val caps = c.get(android.hardware.camera2.CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+            val manual = caps.contains(android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+            val raw = caps.contains(android.hardware.camera2.CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_RAW)
+            val flash = c.get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            val iso = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            val exp = c.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            val minF = c.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
+            val calib = when (c.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION)) {
+                0 -> "uncalibrated"; 1 -> "approximate"; 2 -> "calibrated"; else -> "?"
+            }
+            sb.append("Back camera $id · hardware level $level\n")
+            sb.append("Flash: ${yn(flash)} · instant flash (manual exposure): ${yn(manual && flash)}\n")
+            sb.append("RAW: ${yn(raw)}\n")
+            sb.append("ISO ${iso?.lower}–${iso?.upper} · shutter ${exp?.let { "1/${(1e9 / it.upper).toInt().coerceAtLeast(1)}s–1/${(1e9 / it.lower).toInt()}s" }}\n")
+            sb.append("Focus: min ${"%.0f".format(if (minF > 0) 100f / minF else 0f)} cm · distance $calib (auto distance needs approximate or better)\n")
+            c.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull()?.let { sb.append("Lens ${"%.2f".format(it)} mm") }
+            c.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES)?.firstOrNull()?.let { sb.append(" · f/$it") }
+            sb.append("\n")
+            val nr = c.get(android.hardware.camera2.CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES) ?: IntArray(0)
+            sb.append("Minimal noise reduction: ${yn(nr.contains(android.hardware.camera2.CameraMetadata.NOISE_REDUCTION_MODE_MINIMAL))}\n")
+            val map = c.get(android.hardware.camera2.CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            map?.getOutputSizes(android.graphics.ImageFormat.JPEG)?.maxByOrNull { it.width * it.height }?.let { sb.append("Largest JPEG ${it.width}×${it.height}\n") }
+            if (!flash) sb.append("→ No flash: NIGHT shoots without flash.\n")
+            else if (!manual) sb.append("→ No manual exposure: the flash uses the phone's own auto mode (slower, less consistent).\n")
+            else sb.append("→ Should fire the flash instantly.\n")
+            @Suppress("UNUSED_VARIABLE") val unused = CC to K
+        } catch (t: Throwable) {
+            sb.append("Camera info failed: ${t.message}\n")
+        }
+        return sb.toString()
+    }
+
+    private fun showReport(act: Activity) {
+        val text = report(act)
+        FlashDialog.show(act, "Phone report", text, listOf(
+            FlashDialog.Option("Copy", FlashDialog.Style.PRIMARY) {
+                val cm = act.getSystemService(android.content.ClipboardManager::class.java)
+                cm?.setPrimaryClip(android.content.ClipData.newPlainText("Overnight phone report", text))
+                Toast.makeText(act, "Copied", Toast.LENGTH_SHORT).show()
+            },
+            FlashDialog.Option("Share") {
+                act.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Share report"))
+            },
+        ), cancel = "CLOSE")
     }
 
     // ---------- updates ----------

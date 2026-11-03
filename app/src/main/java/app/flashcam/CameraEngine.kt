@@ -331,23 +331,29 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     }
 
     /**
-     * DRAG: phones keep the LED on for a whole long exposure (over-lighting the subject), so instead:
-     * frame 1 = normal instant PULSE (subject frozen), frame 2 = 1/5 s with no flash (light trails).
-     * The app blends them. Callback gets (pulse, ambient); ambient may be null if it failed.
+     * DRAG, rear curtain: frame 1 = 1/5 s with no flash (the light trails), then right after it
+     * frame 2 = instant PULSE that freezes the subject at the END of its trail, like a real
+     * rear-curtain flash. Both are queued as one burst so there's no gap between them.
+     * Callback gets (pulse, ambient); ambient may be null if it failed.
      */
     fun captureDrag(onJpegs: (ByteArray?, ByteArray?) -> Unit) {
         val h = handler ?: run { onJpegs(null, null); return }
         h.post {
             val s = session; val cam = device; val rd = reader
             if (s == null || cam == null || rd == null) { onJpegs(null, null); return@post }
-            pending = { first ->
-                if (first == null) onJpegs(null, null)
-                else {
-                    pending = { second -> onJpegs(first, second) }
-                    try { s.capture(ambientRequest(cam, rd), null, h) } catch (t: Throwable) { fail() }
-                }
+            pending = { ambient ->
+                pending = { pulse -> onJpegs(pulse, ambient) }
             }
-            try { s.capture(pulseRequest(cam, rd), null, h) } catch (t: Throwable) { fail() }
+            try {
+                s.captureBurst(listOf(ambientRequest(cam, rd), pulseRequest(cam, rd)), null, h)
+            } catch (t: Throwable) {
+                // burst not accepted: fall back to two separate captures in the same order
+                pending = { ambient ->
+                    pending = { pulse -> onJpegs(pulse, ambient) }
+                    try { s.capture(pulseRequest(cam, rd), null, h) } catch (t2: Throwable) { fail() }
+                }
+                try { s.capture(ambientRequest(cam, rd), null, h) } catch (t2: Throwable) { fail() }
+            }
         }
     }
 
@@ -407,6 +413,13 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         previewSurface?.let { b.addTarget(it) }
         applyCommon(b)
         captureTweaks(b)
+        if (!manualSensor) {
+            // phones without manual exposure: let the phone run its own flash (slower, but it fires)
+            b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON_ALWAYS_FLASH)
+            b.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
+            lastExpNs = meteredExposure; lastIso = meteredIso
+            return b.build()
+        }
         val expRange = chars?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         val isoRange = chars?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         val minIso = isoRange?.lower ?: 50

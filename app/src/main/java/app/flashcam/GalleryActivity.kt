@@ -50,6 +50,8 @@ class GalleryActivity : ComponentActivity() {
         class Pic(val index: Int) : Item()
     }
     private var items: List<Item> = emptyList()
+    private val revealOrder = HashMap<String, Int>()   // photo name -> position in its fresh roll
+    private val freshRolls = HashSet<String>()
     private var favOnly = false
     private var selecting = false
     private val selected = LinkedHashSet<Long>()
@@ -206,13 +208,28 @@ class GalleryActivity : ComponentActivity() {
             }
         }
         val rollOf = HashMap<String, Rolls.Developed>()
-        Rolls.developed(this).forEach { d -> d.names.forEach { rollOf[it] = d } }
-        val seen = HashSet<String>()
+        val developed = Rolls.developed(this)
+        developed.forEach { d -> d.names.forEach { rollOf[it] = d } }
+        // rolls that developed since you last looked get a reveal (once)
+        val prefs = getSharedPreferences("flashcam", MODE_PRIVATE)
+        val seen = prefs.getStringSet("revealedRolls", null)
+        if (seen == null) {
+            prefs.edit().putStringSet("revealedRolls", developed.map { it.id }.toSet()).apply()  // first run: nothing to reveal
+        } else {
+            val fresh = developed.filter { it.id !in seen }
+            if (fresh.isNotEmpty()) {
+                fresh.forEach { d -> d.names.sorted().forEachIndexed { i, n -> revealOrder[n] = i } }
+                freshRolls.addAll(fresh.map { it.id })
+                prefs.edit().putStringSet("revealedRolls", seen + fresh.map { it.id }).apply()
+            }
+        }
+        val seenRolls = HashSet<String>()
         val fmt = java.text.SimpleDateFormat("MMM d", java.util.Locale.US)
         shown.forEachIndexed { i, p ->
             val d = rollOf[p.name]
-            if (!favOnly && d != null && seen.add(d.id)) {
-                out.add(Item.Divider("ROLL · " + fmt.format(java.util.Date(d.date)).uppercase() + " · ${d.names.size} FRAMES"))
+            if (!favOnly && d != null && seenRolls.add(d.id)) {
+                val lead = if (d.id in freshRolls) "JUST DEVELOPED" else "ROLL"
+                out.add(Item.Divider(lead + " · " + fmt.format(java.util.Date(d.date)).uppercase() + " · ${d.names.size} FRAMES"))
             }
             out.add(Item.Pic(i))
         }
@@ -269,6 +286,41 @@ class GalleryActivity : ComponentActivity() {
     private fun selectedPhotos() = shown.filter { it.id in selected }
 
     private fun label(text: String, sp: Float, color: Int) = Ui.text(this, text, Ui.scaled(sp), color)
+
+    /**
+     * Freshly developed frames start as a blurred negative and develop into the photo,
+     * one after another down the roll. Each frame does this once.
+     */
+    private fun reveal(img: ImageView, p: Roll.Photo) {
+        val order = revealOrder.remove(p.name) ?: run { clearReveal(img); return }
+        val neg = floatArrayOf(-0.92f, 0f, 0f, 0f, 240f, 0f, -0.92f, 0f, 0f, 232f, 0f, 0f, -0.92f, 0f, 222f, 0f, 0f, 0f, 1f, 0f)
+        val id = floatArrayOf(1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 0f, 1f, 0f)
+        val tag = p.id
+        fun apply(t: Float) {
+            val m = FloatArray(20) { i -> neg[i] + (id[i] - neg[i]) * t }
+            img.colorFilter = android.graphics.ColorMatrixColorFilter(m)
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                val r = (1f - t) * 28f
+                img.setRenderEffect(if (r > 0.5f) android.graphics.RenderEffect.createBlurEffect(r, r, android.graphics.Shader.TileMode.CLAMP) else null)
+            }
+        }
+        apply(0f)
+        android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 1600
+            startDelay = 250L + (order.coerceAtMost(20) * 110L)
+            interpolator = android.view.animation.DecelerateInterpolator(1.4f)
+            addUpdateListener { if (img.tag == tag) apply(it.animatedValue as Float) else cancel() }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(a: android.animation.Animator) { if (img.tag == tag) clearReveal(img) }
+            })
+            start()
+        }
+    }
+
+    private fun clearReveal(img: ImageView) {
+        img.colorFilter = null
+        if (android.os.Build.VERSION.SDK_INT >= 31) img.setRenderEffect(null)
+    }
 
     /** Thin film-progress line for the roll strip. */
     private class ProgressLine(ctx: Context) : View(ctx) {
@@ -394,7 +446,10 @@ class GalleryActivity : ComponentActivity() {
                     }
                     attachDevelopNow(h.root, card)
                 }
-                is Item.Divider -> h.text!!.text = it.text
+                is Item.Divider -> {
+                    h.text!!.text = it.text
+                    h.text.setTextColor(if (it.text.startsWith("JUST")) ORANGE else 0x80FFFFFF.toInt())
+                }
                 is Item.Pic -> bindPic(h, it.index, position)
             }
         }
@@ -429,13 +484,14 @@ class GalleryActivity : ComponentActivity() {
             val cached = cache.get(p.id)
             if (cached != null) {
                 img.setImageBitmap(cached)
+                reveal(img, p)
             } else {
                 img.setImageDrawable(null)
                 val edge = resources.displayMetrics.widthPixels * 3 / 2 / 3 * 3 / 2
                 loader.execute {
                     val bmp = Roll.thumbnail(this@GalleryActivity, p, edge.coerceIn(400, 900)) ?: return@execute
                     cache.put(p.id, bmp)
-                    main.post { if (img.tag == p.id) img.setImageBitmap(bmp) }
+                    main.post { if (img.tag == p.id) { img.setImageBitmap(bmp); reveal(img, p) } }
                 }
             }
         }
