@@ -73,7 +73,7 @@ class ViewerActivity : ComponentActivity() {
             })
         }
         root.addView(pager, FrameLayout.LayoutParams(-1, -1))
-        evRuler = EvRuler(this).apply { range = 3f; visibility = View.GONE; scaleX = -1f }
+        evRuler = EvRuler(this).apply { range = 3f; rightSide = true; visibility = View.GONE }
         root.addView(evRuler, FrameLayout.LayoutParams(dp(56), -1, Gravity.END).apply { topMargin = dp(90); bottomMargin = dp(140) })
         evBox = label("", ORANGE).apply {
             gravity = Gravity.CENTER

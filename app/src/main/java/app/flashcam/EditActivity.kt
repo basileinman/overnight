@@ -82,7 +82,7 @@ class EditActivity : ComponentActivity() {
         })
         root.addView(slider("CONTRAST", 10, 5) { p, t ->
             contrast = (p - 5) / 5f
-            t.text = when { p == 0 -> "OFF"; p > 5 -> "+%d".format(p - 5); else -> "%d".format(p - 5) }
+            t.text = when { p > 5 -> "+%d".format(p - 5); else -> "%d".format(p - 5) }
         })
 
         setContentView(root)
@@ -93,7 +93,7 @@ class EditActivity : ComponentActivity() {
 
         worker.execute {
             val bmp = Roll.decodeSampled(this, uri, 1600)
-            main.post { if (bmp == null) finish() else { preview.setImageBitmap(bmp); apply() } }
+            main.post { if (bmp == null) finish() else { source = bmp; preview.setImageBitmap(bmp); apply() } }
         }
     }
 
@@ -109,8 +109,9 @@ class EditActivity : ComponentActivity() {
         }
         val title = label(name, Color.WHITE, 13f)
         val value = label("", ORANGE, 13f).apply { gravity = Gravity.END }
-        val bar = SeekBar(this).apply {
+        val bar = TickSeekBar(this).apply {
             this.max = max; progress = start
+            tick = start.toFloat() / max
             progressTintList = ColorStateList.valueOf(0x33FFFFFF)
             progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
             thumbTintList = ColorStateList.valueOf(ORANGE)
@@ -143,30 +144,31 @@ class EditActivity : ComponentActivity() {
         return m
     }
 
+    private var source: Bitmap? = null
+    private val renderSeq = java.util.concurrent.atomic.AtomicInteger()
+
+    /** Live preview with the exact same curves the save uses. */
     private fun apply() {
-        preview.colorFilter = if (ev == 0f && wb == 0f && contrast == 0f) null else ColorMatrixColorFilter(matrix())
+        val src = source ?: return
+        val n = renderSeq.incrementAndGet()
+        val t = PhotoEdits.lut(ev, wb, contrast)
+        worker.execute {
+            if (n != renderSeq.get()) return@execute
+            val out = if (ev == 0f && wb == 0f && contrast == 0f) src else PhotoEdits.applyLut(src, t)
+            main.post { if (n == renderSeq.get()) preview.setImageBitmap(out) }
+        }
     }
 
     private fun save() {
         if (ev == 0f && wb == 0f && contrast == 0f) { finish(); return }
-        val m = matrix()
+        val t = PhotoEdits.lut(ev, wb, contrast)
         worker.execute {
             try {
-                val src = Roll.decodeSampled(this, uri, 4000) ?: throw IllegalStateException("decode")
-                val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-                Canvas(out).drawBitmap(src, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(m) })
-                src.recycle()
-                // re-encode, then carry over the original shot info
-                val orig = try { contentResolver.openInputStream(uri)?.use { it.readBytes() } } catch (_: Throwable) { null }
-                val tmp = java.io.File.createTempFile("edit", ".jpg", cacheDir)
-                tmp.outputStream().use { out.compress(Bitmap.CompressFormat.JPEG, 94, it) }
-                if (orig != null) PhotoMeta.copy(orig, tmp)
-                val bytes = tmp.readBytes(); tmp.delete()
+                val bytes = PhotoEdits.render(this, uri) { PhotoEdits.applyLut(it, t) } ?: throw IllegalStateException("decode")
                 val wrote = try {
                     contentResolver.openOutputStream(uri, "wt")?.use { it.write(bytes) } != null
                 } catch (_: Throwable) { false }
                 if (!wrote) saveCopy(bytes)
-                out.recycle()
                 main.post { finish() }
             } catch (t: Throwable) {
                 main.post { Toast.makeText(this, "Couldn't save edit", Toast.LENGTH_SHORT).show() }

@@ -143,6 +143,7 @@ class MainActivity : ComponentActivity() {
         ghost = findViewById(R.id.ghost)
         focusReadout = findViewById(R.id.focusReadout)
         evRuler = findViewById(R.id.evRuler)
+        evRuler.range = 3f
         evBox = findViewById(R.id.evBox)
         evTitle = findViewById(R.id.evTitle)
         evValue = findViewById(R.id.evValue)
@@ -695,9 +696,9 @@ class MainActivity : ComponentActivity() {
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (adjusting) {
-                        // full viewfinder height = 4 EV; slide up to brighten
-                        val delta = (downY - ev.y) / v.height * 4f
-                        val e = (Math.round((startEv + delta) * 10f) / 10f).coerceIn(-2f, 2f)
+                        // full viewfinder height = 6 EV (-3..+3); slide up to brighten
+                        val delta = (downY - ev.y) / v.height * 6f
+                        val e = (Math.round((startEv + delta) * 10f) / 10f).coerceIn(-3f, 3f)
                         if (e != currentEv()) {
                             if (pmMode) evPm = e else evAm = e
                             Haptics.tick(v)

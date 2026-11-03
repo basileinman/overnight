@@ -199,7 +199,7 @@ class LookLabActivity : ComponentActivity() {
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(4), 0, dp(4)) }
             val name = label(k.label, Color.WHITE, 11f)
             val value = label("", ORANGE, 11f).apply { gravity = Gravity.END }
-            val bar = SeekBar(this).apply {
+            val bar = TickSeekBar(this).apply {
                 max = 1000
                 progressTintList = ColorStateList.valueOf(0x33FFFFFF)
                 progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
@@ -230,6 +230,7 @@ class LookLabActivity : ComponentActivity() {
         for ((k, bar, value) in sliders) {
             val v = k.get(params)
             bar.progress = (((v - k.min) / (k.max - k.min)) * 1000f).toInt().coerceIn(0, 1000)
+            (bar as? TickSeekBar)?.tick = ((k.get(LookSettings.builtIn(mode)) - k.min) / (k.max - k.min)).coerceIn(0f, 1f)
             value.text = valueText(k, v)
             (bar.parent as View).visibility = if (k.nightOnly && mode != Look.Mode.AM) View.GONE else View.VISIBLE
         }

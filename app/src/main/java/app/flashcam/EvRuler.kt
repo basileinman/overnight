@@ -7,10 +7,13 @@ import android.graphics.Typeface
 import android.util.AttributeSet
 import android.view.View
 
-/** Vertical exposure ruler shown while holding + sliding on the viewfinder. +2 EV at top, -2 at bottom. */
+/** Vertical exposure ruler shown while holding + sliding on the viewfinder. +range EV at top, -range at bottom. */
 class EvRuler @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
 
     var range = 2f
+        set(v) { field = v; invalidate() }
+    /** Draw the scale hugging the right edge (labels to the left of it), unmirrored. */
+    var rightSide = false
         set(v) { field = v; invalidate() }
     var ev = 0f
         set(v) { field = v; invalidate() }
@@ -29,7 +32,9 @@ class EvRuler @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = nul
     }
 
     override fun onDraw(c: Canvas) {
-        val x = 18f * d
+        val x = if (rightSide) width - 18f * d else 18f * d
+        text.textAlign = if (rightSide) Paint.Align.RIGHT else Paint.Align.LEFT
+        val lx = if (rightSide) x - 12f * d else x + 12f * d
         c.drawLine(x, yFor(range), x, yFor(-range), line)
         var v = -range
         while (v <= range + 0.001f) {
@@ -38,7 +43,7 @@ class EvRuler @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = nul
             c.drawLine(x - (if (major) 8f else 4f) * d, y, x + (if (major) 8f else 4f) * d, y, line)
             if (major) {
                 val label = if (v > 0) "+${v.toInt()}" else "${v.toInt()}"
-                c.drawText(label, x + 12f * d, y + 4f * d, text)
+                c.drawText(label, lx, y + 4f * d, text)
             }
             v += 0.5f
         }
