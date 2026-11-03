@@ -125,14 +125,26 @@ object Ui {
                     c.drawCircle(cx + 4.5f * u, cy - 2f * u, 3.5f * u, fill)
                 }
                 Icon.GEAR -> {
-                    c.drawCircle(cx, cy, 3f * u, p)
-                    c.drawCircle(cx, cy, 7f * u, p)
-                    for (i in 0 until 8) {
-                        val a = Math.toRadians(i * 45.0)
-                        val x0 = cx + (7f * u) * Math.cos(a).toFloat(); val y0 = cy + (7f * u) * Math.sin(a).toFloat()
-                        val x1 = cx + (9.5f * u) * Math.cos(a).toFloat(); val y1 = cy + (9.5f * u) * Math.sin(a).toFloat()
-                        c.drawLine(x0, y0, x1, y1, p)
+                    // one continuous outline: 6 squared teeth on a body, hollow center
+                    val outer = 8.5f * u; val root = 6.4f * u
+                    val path = Path()
+                    fun pt(rad: Float, deg: Double, first: Boolean = false) {
+                        val a = Math.toRadians(deg)
+                        val x = cx + rad * Math.cos(a).toFloat(); val y = cy + rad * Math.sin(a).toFloat()
+                        if (first) path.moveTo(x, y) else path.lineTo(x, y)
                     }
+                    for (i in 0 until 6) {
+                        val t = i * 60.0 - 90.0
+                        pt(root, t - 14.0, i == 0)
+                        pt(outer, t - 10.0); pt(outer, t + 10.0)
+                        pt(root, t + 14.0)
+                        // body edge between teeth
+                        var d = t + 14.0
+                        while (d < t + 46.0) { d += 8.0; pt(root, minOf(d, t + 46.0)) }
+                    }
+                    path.close()
+                    c.drawPath(path, p)
+                    c.drawCircle(cx, cy, 2.6f * u, p)
                 }
             }
         }

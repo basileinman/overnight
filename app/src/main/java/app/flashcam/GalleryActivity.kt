@@ -100,7 +100,7 @@ class GalleryActivity : ComponentActivity() {
         header.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         val gear = ImageView(this).apply {
             setImageDrawable(Ui.IconDrawable(this@GalleryActivity, Ui.Icon.GEAR, Ui.DIM))
-            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setPadding(dp(9), dp(9), dp(9), dp(9))
             contentDescription = "Settings"
             setOnClickListener { Settings.show(this@GalleryActivity) }
         }
