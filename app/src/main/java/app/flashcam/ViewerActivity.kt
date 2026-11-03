@@ -39,6 +39,9 @@ class ViewerActivity : ComponentActivity() {
     private lateinit var infoPanel: LinearLayout
     private var showInfo = false
     private val adapter = PageAdapter()
+    private lateinit var evRuler: EvRuler
+    private lateinit var evBox: TextView
+    private var holdEv = 0f
 
     private var looping = false
     private var loopFrames: List<Bitmap> = emptyList()
@@ -70,6 +73,16 @@ class ViewerActivity : ComponentActivity() {
             })
         }
         root.addView(pager, FrameLayout.LayoutParams(-1, -1))
+        evRuler = EvRuler(this).apply { range = 3f; visibility = View.GONE; scaleX = -1f }
+        root.addView(evRuler, FrameLayout.LayoutParams(dp(56), -1, Gravity.END).apply { topMargin = dp(90); bottomMargin = dp(140) })
+        evBox = label("", ORANGE).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(10), dp(18), dp(10))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+            background = android.graphics.drawable.GradientDrawable().apply { setColor(0xCC1E1E1E.toInt()); cornerRadius = dp(10).toFloat() }
+            visibility = View.GONE
+        }
+        root.addView(evBox, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
         // top: CLOSE   001   EDIT
         val top = LinearLayout(this).apply {
@@ -242,6 +255,45 @@ class ViewerActivity : ComponentActivity() {
         letterSpacing = 0.1f
     }
 
+    // ---------- hold + slide to change exposure ----------
+
+    private fun holdExposure(img: ZoomImageView, phase: Int, dy: Float) {
+        when (phase) {
+            0 -> {
+                stopLoop()
+                holdEv = 0f
+                evRuler.ev = 0f; evRuler.visibility = View.VISIBLE
+                evBox.text = "EXP\n+0.0 EV"; evBox.visibility = View.VISIBLE
+            }
+            1 -> {
+                // full screen height = 6 EV (-3..+3)
+                val e = (Math.round(dy / pager.height * 6f * 10f) / 10f).coerceIn(-3f, 3f)
+                if (e != holdEv) {
+                    holdEv = e
+                    Haptics.tick(img)
+                    evRuler.ev = e
+                    evBox.text = "EXP\n" + (if (e > 0) "+" else "") + "%.1f EV".format(e)
+                    img.colorFilter = if (e == 0f) null else android.graphics.ColorMatrixColorFilter(PhotoEdits.matrix(e))
+                }
+            }
+            2 -> {
+                evRuler.visibility = View.GONE
+                evBox.visibility = View.GONE
+                val p = current() ?: return
+                val e = holdEv
+                if (e == 0f) { img.colorFilter = null; return }
+                loader.execute {
+                    val ok = PhotoEdits.save(this, p.uri, PhotoEdits.matrix(e))
+                    main.post {
+                        if (!ok) android.widget.Toast.makeText(this, "Couldn't save exposure", android.widget.Toast.LENGTH_SHORT).show()
+                        img.colorFilter = null
+                        adapter.notifyItemChanged(pager.currentItem)
+                    }
+                }
+            }
+        }
+    }
+
     // ---------- burst loop (flipbook of the 5 frames) ----------
 
     private fun startLoop() {
@@ -283,6 +335,7 @@ class ViewerActivity : ComponentActivity() {
         override fun getItemCount() = photos.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageHolder {
             val v = ZoomImageView(this@ViewerActivity).apply { layoutParams = ViewGroup.LayoutParams(-1, -1) }
+            v.onHoldDrag = { phase, dy -> holdExposure(v, phase, dy) }
             return PageHolder(v)
         }
         override fun onBindViewHolder(h: PageHolder, position: Int) {

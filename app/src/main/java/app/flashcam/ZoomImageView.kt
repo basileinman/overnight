@@ -17,6 +17,18 @@ import kotlin.math.min
 class ZoomImageView(ctx: Context) : ImageView(ctx) {
 
     var onSwipe: ((dir: Int) -> Unit)? = null   // -1 = swipe left, +1 = swipe right
+    /** Hold then slide: phase 0 = start, 1 = moving (dy px, up = positive), 2 = released. */
+    var onHoldDrag: ((phase: Int, dy: Float) -> Unit)? = null
+    private var holding = false
+    private var holdDownX = 0f
+    private var holdDownY = 0f
+    private val slop = android.view.ViewConfiguration.get(ctx).scaledTouchSlop
+    private val holdStart = Runnable {
+        holding = true
+        parent?.requestDisallowInterceptTouchEvent(true)
+        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        onHoldDrag?.invoke(0, 0f)
+    }
 
     private val m = Matrix()
     private var baseScale = 1f
@@ -75,6 +87,24 @@ class ZoomImageView(ctx: Context) : ImageView(ctx) {
     })
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (onHoldDrag != null) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    holdDownX = event.x; holdDownY = event.y; holding = false
+                    if (!isZoomed) postDelayed(holdStart, 300)
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> removeCallbacks(holdStart)
+                MotionEvent.ACTION_MOVE -> {
+                    if (holding) { onHoldDrag?.invoke(1, holdDownY - event.y); return true }
+                    if (kotlin.math.abs(event.x - holdDownX) > slop * 2 || kotlin.math.abs(event.y - holdDownY) > slop * 2) removeCallbacks(holdStart)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    removeCallbacks(holdStart)
+                    if (holding) { holding = false; parent?.requestDisallowInterceptTouchEvent(false); onHoldDrag?.invoke(2, 0f); return true }
+                }
+            }
+            if (holding) return true
+        }
         scaleDetector.onTouchEvent(event)
         if (!scaleDetector.isInProgress) gestures.onTouchEvent(event)
         if (isZoomed || event.pointerCount > 1) parent?.requestDisallowInterceptTouchEvent(true)

@@ -207,6 +207,8 @@ class LookLabActivity : ComponentActivity() {
                 setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                     override fun onProgressChanged(s: SeekBar, prog: Int, fromUser: Boolean) {
                         if (!fromUser) return
+                        val notch = prog / 50
+                        if (s.tag != notch) { s.tag = notch; Haptics.tick(s) }
                         val v = k.min + (k.max - k.min) * prog / 1000f
                         params = k.set(params, v)
                         value.text = valueText(k, v)

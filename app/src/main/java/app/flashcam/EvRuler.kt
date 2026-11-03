@@ -10,6 +10,8 @@ import android.view.View
 /** Vertical exposure ruler shown while holding + sliding on the viewfinder. +2 EV at top, -2 at bottom. */
 class EvRuler @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
 
+    var range = 2f
+        set(v) { field = v; invalidate() }
     var ev = 0f
         set(v) { field = v; invalidate() }
 
@@ -23,14 +25,14 @@ class EvRuler @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = nul
     private fun yFor(v: Float): Float {
         val top = paddingTop + 24f * d
         val bottom = height - paddingBottom - 24f * d
-        return top + (2f - v) / 4f * (bottom - top)
+        return top + (range - v) / (2f * range) * (bottom - top)
     }
 
     override fun onDraw(c: Canvas) {
         val x = 18f * d
-        c.drawLine(x, yFor(2f), x, yFor(-2f), line)
-        var v = -2f
-        while (v <= 2.001f) {
+        c.drawLine(x, yFor(range), x, yFor(-range), line)
+        var v = -range
+        while (v <= range + 0.001f) {
             val y = yFor(v)
             val major = abs1(v) < 0.01f || abs1(v - Math.round(v)) < 0.01f
             c.drawLine(x - (if (major) 8f else 4f) * d, y, x + (if (major) 8f else 4f) * d, y, line)
@@ -40,7 +42,7 @@ class EvRuler @JvmOverloads constructor(ctx: Context, attrs: AttributeSet? = nul
             }
             v += 0.5f
         }
-        val my = yFor(ev.coerceIn(-2f, 2f))
+        val my = yFor(ev.coerceIn(-range, range))
         c.drawLine(x - 10f * d, my, x + 10f * d, my, mark)
     }
 

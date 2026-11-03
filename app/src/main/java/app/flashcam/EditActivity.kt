@@ -75,12 +75,15 @@ class EditActivity : ComponentActivity() {
             setOnClickListener { ev = 0f; wb = 0f; contrast = 0f; bars.forEach { it.first.progress = it.third }; apply() }
         }
         root.addView(reset, LinearLayout.LayoutParams(-1, -2))
-        root.addView(slider("EXPOSURE", 40, 20) { p, t -> ev = (p - 20) / 10f; t.text = (if (ev >= 0) "+" else "") + "%.1f EV".format(ev) })
-        root.addView(slider("WHITE BALANCE", 100, 50) { p, t ->
-            wb = (p - 50) / 50f
-            t.text = when { p == 50 -> "ORIGINAL"; wb > 0 -> "WARM +%d".format(p - 50); else -> "COOL %d".format(p - 50) }
+        root.addView(slider("EXPOSURE", 60, 30) { p, t -> ev = (p - 30) / 10f; t.text = (if (ev >= 0) "+" else "") + "%.1f EV".format(ev) })
+        root.addView(slider("WHITE BALANCE", 20, 10) { p, t ->
+            wb = (p - 10) / 10f
+            t.text = when { p == 10 -> "ORIGINAL"; p > 10 -> "WARMER"; else -> "COOLER" }
         })
-        root.addView(slider("CONTRAST", 100, 50) { p, t -> contrast = (p - 50) / 50f; t.text = "%d".format(p - 50) })
+        root.addView(slider("CONTRAST", 10, 5) { p, t ->
+            contrast = (p - 5) / 5f
+            t.text = when { p == 0 -> "OFF"; p > 5 -> "+%d".format(p - 5); else -> "%d".format(p - 5) }
+        })
 
         setContentView(root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
@@ -112,7 +115,7 @@ class EditActivity : ComponentActivity() {
             progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
             thumbTintList = ColorStateList.valueOf(ORANGE)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) { onChange(p, value); apply() }
+                override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) { if (fromUser) Haptics.tick(s); onChange(p, value); apply() }
                 override fun onStartTrackingTouch(s: SeekBar) {}
                 override fun onStopTrackingTouch(s: SeekBar) {}
             })

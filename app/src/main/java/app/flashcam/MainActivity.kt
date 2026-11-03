@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var flashBtn: TextView
     private lateinit var burstBtn: TextView
     private lateinit var blurBtn: TextView
-    private lateinit var flipBtn: ImageView
+    private lateinit var flipBtn: TextView   // now the ROLL button
     private lateinit var thumb: ImageView
     private lateinit var focusReadout: TextView
     private lateinit var evRuler: EvRuler
@@ -168,7 +168,7 @@ class MainActivity : ComponentActivity() {
         burst = prefs.getBoolean("burst", false)
         double = prefs.getBoolean("double", false) && !burst
         drag = false  // BLUR always starts off
-        front = prefs.getBoolean("front", false)
+        front = false  // back camera only
         debug = prefs.getBoolean("debug", false)
         evAm = prefs.getFloat("evAm", 0f)
         evPm = prefs.getFloat("evPm2", 0.1f)
@@ -210,7 +210,8 @@ class MainActivity : ComponentActivity() {
             engine.setDrag(realDrag)
             refreshUi()
         }
-        flipBtn.setOnClickListener { if (!busy) { front = !front; save(); refreshUi(); reopen() } }
+        flipBtn.setOnClickListener { if (!busy) rollMenu() }
+        flipBtn.setOnLongClickListener { statusText.performLongClick() }
         thumb.setOnLongClickListener {
             if (debug) startActivity(Intent(this, LookLabActivity::class.java))
             else toast("Look Lab: turn on debug first (hold the roll counter)")
@@ -699,16 +700,28 @@ class MainActivity : ComponentActivity() {
                         val e = (Math.round((startEv + delta) * 10f) / 10f).coerceIn(-2f, 2f)
                         if (e != currentEv()) {
                             if (pmMode) evPm = e else evAm = e
+                            Haptics.tick(v)
                             showEv(e)
                             engine.setEv(e)
                         }
-                    } else if (Math.abs(ev.x - downX) > slop || Math.abs(ev.y - downY) > slop) {
-                        moved = true
-                        main.removeCallbacks(beginAdjust)
+                    } else {
+                        val dx = Math.abs(ev.x - downX); val dy = Math.abs(ev.y - downY)
+                        if (dy > slop && dy > dx) {
+                            // vertical slide: start adjusting right away (no need to wait for the hold)
+                            main.removeCallbacks(beginAdjust)
+                            beginAdjust.run()
+                            downY = ev.y
+                        } else if (dx > slop * 3) {
+                            // clearly not a tap or an exposure drag
+                            moved = true
+                            main.removeCallbacks(beginAdjust)
+                        }
+                        // small wobble while holding still is ignored, so hold-then-slide works
                     }
                 }
                 MotionEvent.ACTION_UP -> {
                     main.removeCallbacks(beginAdjust)
+                    if (!adjusting && Math.abs(ev.y - downY) > slop * 3) moved = true
                     if (adjusting) {
                         save()
                         main.postDelayed(hideEvRunnable, 700)
@@ -830,9 +843,11 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshRoll() {
         val a = Rolls.active(this)
-        statusText.text = (if (a == null) "LOAD ROLL" else "%02d LEFT".format(a.left)) + if (debug) " · DBG" else ""
-        statusText.setTextColor(if (a == null) 0x80FFFFFF.toInt() else ORANGE)
+        statusText.text = if (debug) "DBG" else ""
+        flipBtn.text = if (a == null) "LOAD\nROLL" else "%02d\nLEFT".format(a.left)
+        flipBtn.setTextColor(if (a == null) 0xB3FFFFFF.toInt() else ORANGE)
     }
+
 
     // ---------- rolls ----------
 

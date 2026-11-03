@@ -59,6 +59,8 @@ class GalleryActivity : ComponentActivity() {
     private lateinit var tabFav: TextView
     private lateinit var selectBtn: TextView
     private lateinit var bottomBar: LinearLayout
+    private lateinit var shareBtn: TextView
+    private lateinit var deleteBtn: TextView
     private lateinit var emptyText: TextView
     private val adapter = Adapter()
 
@@ -135,11 +137,15 @@ class GalleryActivity : ComponentActivity() {
             gravity = Gravity.CENTER; setPadding(0, dp(22), 0, dp(22))
             setOnClickListener {
                 val sel = selectedPhotos()
-                if (sel.isNotEmpty() && RollActions.delete(this@GalleryActivity, sel.map { it.uri }, deletePrompt)) {
-                    exitSelect(); reload()
-                }
+                if (sel.isEmpty()) return@setOnClickListener
+                FlashDialog.show(this@GalleryActivity, "Delete ${sel.size} photo" + (if (sel.size == 1) "" else "s"),
+                    "This removes them from the roll and your phone's gallery.",
+                    listOf(FlashDialog.Option("Delete", FlashDialog.Style.DANGER) {
+                        if (RollActions.delete(this@GalleryActivity, sel.map { it.uri }, deletePrompt)) { exitSelect(); reload() }
+                    }))
             }
         }
+        shareBtn = share; deleteBtn = del
         bottomBar.addView(share, LinearLayout.LayoutParams(0, -2, 1f))
         bottomBar.addView(del, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(bottomBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
@@ -234,7 +240,7 @@ class GalleryActivity : ComponentActivity() {
     }
 
     private fun enterSelect() {
-        selecting = true; selected.clear()
+        selecting = true; selected.clear(); updateCounts()
         selectBtn.text = "CANCEL"
         bottomBar.visibility = View.VISIBLE
         adapter.notifyDataSetChanged()
@@ -245,6 +251,12 @@ class GalleryActivity : ComponentActivity() {
         selectBtn.text = "SELECT"
         bottomBar.visibility = View.GONE
         adapter.notifyDataSetChanged()
+    }
+
+    private fun updateCounts() {
+        val n = selected.size
+        shareBtn.text = if (n > 0) "SHARE $n" else "SHARE"
+        deleteBtn.text = if (n > 0) "DELETE $n" else "DELETE"
     }
 
     private fun selectedPhotos() = shown.filter { it.id in selected }
@@ -384,6 +396,7 @@ class GalleryActivity : ComponentActivity() {
                 if (selecting) {
                     if (!selected.remove(p.id)) selected.add(p.id)
                     notifyItemChanged(h.bindingAdapterPosition)
+                    updateCounts()
                 } else {
                     startActivity(Intent(this@GalleryActivity, ViewerActivity::class.java)
                         .putExtra(EXTRA_INDEX, index).putExtra(EXTRA_FAV_ONLY, favOnly))
@@ -391,7 +404,7 @@ class GalleryActivity : ComponentActivity() {
             }
             h.root.setOnLongClickListener {
                 if (!selecting) enterSelect()
-                selected.add(p.id); notifyItemChanged(h.bindingAdapterPosition); true
+                selected.add(p.id); notifyItemChanged(h.bindingAdapterPosition); updateCounts(); true
             }
             img.tag = p.id
             val cached = cache.get(p.id)
