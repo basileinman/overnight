@@ -60,6 +60,41 @@ class LookLabActivity : ComponentActivity() {
     private lateinit var sliderBox: LinearLayout
     private val sliders = ArrayList<Triple<LookSettings.Knob, SeekBar, TextView>>()
 
+    /** Pick reference photos (e.g. reference HEICs from Drive) and save them as JPEGs in Pictures/Overnight Refs. */
+    private val pickRefs = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNullOrEmpty()) return@registerForActivityResult
+        toast("Converting ${uris.size} photos…")
+        worker.execute {
+            var ok = 0
+            for (u in uris) {
+                try {
+                    val name = contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                        if (c.moveToFirst()) c.getString(0) else null
+                    } ?: "ref_${System.currentTimeMillis()}"
+                    val base = name.substringBeforeLast('.')
+                    val bmp = if (Build.VERSION.SDK_INT >= 28) {
+                        android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(contentResolver, u)) { dec, info, _ ->
+                            val s = kotlin.math.min(1f, 2400f / kotlin.math.max(info.size.width, info.size.height))
+                            dec.setTargetSize((info.size.width * s).toInt(), (info.size.height * s).toInt())
+                            dec.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+                        }
+                    } else contentResolver.openInputStream(u)?.use { android.graphics.BitmapFactory.decodeStream(it) }
+                    if (bmp == null) continue
+                    val values = android.content.ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, "$base.jpg")
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Images.Media.RELATIVE_PATH, android.os.Environment.DIRECTORY_PICTURES + "/Overnight Refs")
+                    }
+                    val out = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: continue
+                    contentResolver.openOutputStream(out)?.use { bmp.compress(Bitmap.CompressFormat.JPEG, 95, it) }
+                    bmp.recycle()
+                    ok++
+                } catch (_: Throwable) {}
+            }
+            main.post { toast("Saved $ok JPEGs to Pictures/Overnight Refs") }
+        }
+    }
+
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -110,7 +145,8 @@ class LookLabActivity : ComponentActivity() {
             LinearLayout.LayoutParams(0, -2, 1.3f).apply { rightMargin = dp(6) })
         bottom.addView(button("REVERT") { params = LookSettings.params(this, mode); syncSliders(); render() },
             LinearLayout.LayoutParams(0, -2, 0.8f).apply { rightMargin = dp(6) })
-        bottom.addView(button("COPY") { copySettings() }, LinearLayout.LayoutParams(0, -2, 0.8f))
+        bottom.addView(button("COPY") { copySettings() }, LinearLayout.LayoutParams(0, -2, 0.8f).apply { rightMargin = dp(6) })
+        bottom.addView(button("CONVERT") { pickRefs.launch(arrayOf("image/*")) }, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(bottom)
 
         setContentView(root)
