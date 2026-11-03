@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var blurIcon: Ui.IconDrawable
     private lateinit var flipBtn: TextView   // now the ROLL button
     private lateinit var thumb: ImageView
+    private lateinit var thumbBadge: TextView
     private lateinit var focusReadout: TextView
     private lateinit var evRuler: EvRuler
     private lateinit var evBox: View
@@ -140,6 +141,10 @@ class MainActivity : ComponentActivity() {
         blurBtn = findViewById(R.id.blurBtn)
         flipBtn = findViewById(R.id.flipBtn)
         thumb = findViewById(R.id.thumb)
+        thumbBadge = findViewById(R.id.thumbBadge)
+        thumbBadge.background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(ORANGE); cornerRadius = Ui.dp(this@MainActivity, 9f)
+        }
         ghost = findViewById(R.id.ghost)
         focusReadout = findViewById(R.id.focusReadout)
         evRuler = findViewById(R.id.evRuler)
@@ -632,7 +637,13 @@ class MainActivity : ComponentActivity() {
             val th = Bitmap.createScaledBitmap(out, 160, max(1, 160 * out.height / out.width), true)
             out.recycle()
             // roll shots stay hidden until developed
-            if (rollId == null) main.post { thumb.setImageBitmap(th) }  // shown even when locked: only what you just took
+            if (rollId == null) main.post { thumb.setImageBitmap(th); thumbBadge.visibility = View.GONE }  // shown even when locked: only what you just took
+            else {
+                // roll shots stay hidden: show the frame as an undeveloped, blurred negative instead
+                val neg = latentImage(th)
+                try { File(filesDir, "latent_$rollId.jpg").outputStream().use { neg.compress(Bitmap.CompressFormat.JPEG, 85, it) } } catch (_: Throwable) {}
+                main.post { showLatent(neg, rollId) }
+            }
         } catch (t: Throwable) {
             main.post { toast("Processing failed: ${t.message}") }
         }
@@ -666,12 +677,57 @@ class MainActivity : ComponentActivity() {
         return uri
     }
 
+    /**
+     * Thumbnail logic: while a roll is shooting or at the lab, show its latest frame as a latent image
+     * (blurred, inverted, orange-cast like a color negative) with a frame count. Otherwise the newest photo.
+     */
     private fun loadLastThumb() {
         processExecutor.execute {
-            val last = Roll.load(this).firstOrNull() ?: return@execute
-            val bmp = Roll.thumbnail(this, last, 160)
-            if (bmp != null) main.post { thumb.setImageBitmap(bmp) }
+            val a = Rolls.active(this)
+            val roll: Pair<String, Int>? = when {
+                a != null && a.used > 0 -> a.id to a.used
+                else -> Rolls.lab(this).maxByOrNull { it.ready }?.let { it.id to it.used }
+            }
+            val latent = roll?.let { (id, _) ->
+                File(filesDir, "latent_$id.jpg").takeIf { it.exists() }?.let { BitmapFactory.decodeFile(it.absolutePath) }
+            }
+            if (roll != null && latent != null) { main.post { showLatent(latent, roll.first, roll.second) }; return@execute }
+            // clean up negatives of rolls that have developed
+            filesDir.listFiles { f -> f.name.startsWith("latent_") && f.name != "latent_${roll?.first}.jpg" }?.forEach { it.delete() }
+            val last = Roll.load(this).firstOrNull()
+            val bmp = last?.let { Roll.thumbnail(this, it, 160) }
+            main.post { if (bmp != null) thumb.setImageBitmap(bmp); thumbBadge.visibility = View.GONE }
         }
+    }
+
+    private fun showLatent(neg: Bitmap, rollId: String, count: Int? = null) {
+        if (secureMode) return
+        val n = count ?: Rolls.active(this)?.takeIf { it.id == rollId }?.used ?: return
+        thumb.setImageBitmap(neg)
+        thumb.alpha = 0.4f
+        thumb.animate().alpha(1f).setDuration(350).start()
+        thumbBadge.text = n.toString()
+        thumbBadge.visibility = View.VISIBLE
+    }
+
+    /** Tiny frame -> heavy blur -> color negative (inverted, orange film base, a bit dark). */
+    private fun latentImage(src: Bitmap): Bitmap {
+        val w = src.width; val h = src.height
+        val tiny = Bitmap.createScaledBitmap(src, 10, max(1, 10 * h / w), true)
+        val mid = Bitmap.createScaledBitmap(tiny, 40, max(1, 40 * h / w), true)
+        val soft = Bitmap.createScaledBitmap(mid, w, h, true)
+        tiny.recycle(); mid.recycle()
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val cm = android.graphics.ColorMatrix(floatArrayOf(
+            -0.80f, 0f, 0f, 0f, 235f,
+            0f, -0.62f, 0f, 0f, 150f,
+            0f, 0f, -0.42f, 0f, 85f,
+            0f, 0f, 0f, 1f, 0f,
+        ))
+        val p = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply { colorFilter = android.graphics.ColorMatrixColorFilter(cm) }
+        android.graphics.Canvas(out).drawBitmap(soft, 0f, 0f, p)
+        soft.recycle()
+        return out
     }
 
     // ---------- ui state ----------
@@ -909,16 +965,17 @@ class MainActivity : ComponentActivity() {
     private fun confirmSendToLab() {
         FlashDialog.show(this, "Send to lab?", "The roll is finished and develops at 8:00 AM. No more photos can be added to it.",
             listOf(FlashDialog.Option("Send to lab", FlashDialog.Style.PRIMARY) {
-                Rolls.sendToLab(this); refreshRoll(); toast("Developing · ready 8:00 AM")
+                Rolls.sendToLab(this); refreshRoll(); loadLastThumb(); toast("Developing · ready 8:00 AM")
             }))
     }
 
     private fun confirmDiscard() {
         FlashDialog.show(this, "Discard this roll?", "Every photo on it will be deleted. This can't be undone.",
-            listOf(FlashDialog.Option("Discard roll", FlashDialog.Style.DANGER) { Rolls.discardActive(this); refreshRoll() }))
+            listOf(FlashDialog.Option("Discard roll", FlashDialog.Style.DANGER) { Rolls.discardActive(this); refreshRoll(); loadLastThumb() }))
     }
 
     private fun rollFinishedDialog() {
+        loadLastThumb()
         FlashDialog.loadRoll(this, "Roll finished", "Developing · ready 8:00 AM. Load another roll?") { loadRoll(it) }
     }
 
