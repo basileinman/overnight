@@ -182,17 +182,11 @@ class EditActivity : ComponentActivity() {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/FlashCam")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/" + Paths.ROLL)
         }
         val u = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return
         contentResolver.openOutputStream(u)?.use { it.write(bytes) }
     }
 
-    private fun label(text: String, color: Int, sp: Float) = TextView(this).apply {
-        this.text = text
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
-        setTextColor(color)
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        letterSpacing = 0.14f
-    }
+    private fun label(text: String, color: Int, sp: Float) = Ui.text(this, text, Ui.scaled(sp), color)
 }

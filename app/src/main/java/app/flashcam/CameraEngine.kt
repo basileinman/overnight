@@ -32,11 +32,11 @@ import kotlin.math.roundToInt
  */
 class CameraEngine(context: Context, private val textureView: TextureView) {
 
-    enum class Flash { PULSE, TORCH, SCREEN, NONE }
+    enum class Flash { PULSE, NONE }
 
-    data class Config(val front: Boolean, val pm: Boolean, val far: Boolean, val ev: Float = 0f, val drag: Boolean = false, val autoFocus: Boolean = false)
+    data class Config(val pm: Boolean, val far: Boolean, val ev: Float = 0f, val drag: Boolean = false, val autoFocus: Boolean = false)
 
-    data class Info(val isFront: Boolean, val hasFlash: Boolean, val manualSensor: Boolean)
+    data class Info(val hasFlash: Boolean, val manualSensor: Boolean)
 
     companion object {
         // Disposable-camera style fixed exposure for flash pulses
@@ -52,7 +52,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         const val CLOSE_M = 0.91f                   // 3 ft
         const val FAR_M = 1.83f                     // 6 ft
         const val FALLBACK_M = 1.22f                // 4 ft: disposable-style fixed focus when it's too dark for AF
-        const val TORCH_SETTLE_MS = 300L
         // DRAG: slow shutter so lights streak, flash freezes the subject
         const val DRAG_EXPOSURE_NS = 200_000_000L  // 1/5 s
         const val DRAG_MAX_ISO = 400
@@ -68,7 +67,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     private var previewSurface: Surface? = null
     private var chars: CameraCharacteristics? = null
     private var config: Config? = null
-    private var torchOn = false
     @Volatile private var pending: ((ByteArray?) -> Unit)? = null
     // latest auto-exposure reading from the live viewfinder
     @Volatile private var meteredExposure = 0L
@@ -91,7 +89,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     }
 
     var sensorOrientation = 90; private set
-    var isFront = false; private set
     var hasFlash = false; private set
     var manualSensor = false; private set
     private var minFocus = 0f
@@ -113,10 +110,9 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         val h = Handler(t.looper)
         handler = h
 
-        val id = pickCamera(cfg.front) ?: run { onError("No camera"); return }
+        val id = pickCamera() ?: run { onError("No camera"); return }
         val c = manager.getCameraCharacteristics(id)
         chars = c
-        isFront = c.get(CameraCharacteristics.LENS_FACING) == CameraMetadata.LENS_FACING_FRONT
         sensorOrientation = c.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
         hasFlash = c.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
         minFocus = c.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
@@ -149,7 +145,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
                 ByteArray(buf.remaining()).also { b -> buf.get(b) }
             }
             img?.close()
-            if (torchOn) setTorch(false)
             val cb = pending
             pending = null
             cb?.invoke(bytes)
@@ -183,11 +178,10 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         previewSurface?.release(); previewSurface = null
         thread?.quitSafely(); thread = null; handler = null
         pending = null
-        torchOn = false
     }
 
-    private fun pickCamera(front: Boolean): String? {
-        val want = if (front) CameraMetadata.LENS_FACING_FRONT else CameraMetadata.LENS_FACING_BACK
+    private fun pickCamera(): String? {
+        val want = CameraMetadata.LENS_FACING_BACK
         val ids = manager.cameraIdList
         return ids.firstOrNull { manager.getCameraCharacteristics(it).get(CameraCharacteristics.LENS_FACING) == want }
             ?: ids.firstOrNull()
@@ -208,7 +202,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
                 override fun onConfigured(s: CameraCaptureSession) {
                     session = s
                     startPreview()
-                    main.post { onReady(Info(isFront, hasFlash, manualSensor)) }
+                    main.post { onReady(Info(hasFlash, manualSensor)) }
                 }
                 override fun onConfigureFailed(s: CameraCaptureSession) {
                     main.post { onError("Camera session failed") }
@@ -228,9 +222,9 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         b.set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_DAYLIGHT)
         if (cfg.pm) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-        } else if (!isFront && minFocus > 0f && cfg.autoFocus) {
+        } else if (minFocus > 0f && cfg.autoFocus) {
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-        } else if (!isFront && minFocus > 0f) {
+        } else if (minFocus > 0f) {
             val diopters = min(1f / (if (cfg.far) FAR_M else CLOSE_M), minFocus)
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
             b.set(CaptureRequest.LENS_FOCUS_DISTANCE, diopters)
@@ -243,14 +237,14 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         }
     }
 
-    private fun previewRequest(torch: Boolean): CaptureRequest? {
+    private fun previewRequest(): CaptureRequest? {
         val cam = device ?: return null
         val surface = previewSurface ?: return null
         val b = cam.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         b.addTarget(surface)
         applyCommon(b)
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
-        b.set(CaptureRequest.FLASH_MODE, if (torch) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
+        b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
         return b.build()
     }
 
@@ -267,7 +261,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
      */
     private fun flashDistanceFactor(): Double {
         val cfg = config ?: return 1.0
-        if (isFront) return 1.0
         val d: Double = when {
             cfg.autoFocus -> (subjectDistanceM() ?: FALLBACK_M).toDouble()
             cfg.far -> FAR_M.toDouble()
@@ -280,7 +273,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     /** Scene brightness (EV at ISO 100) from the live meter, corrected for exposure comp. Null until metered. */
     fun sceneEv(): Double? {
         val e = meteredExposure; val iso = meteredIso
-        if (e <= 0 || iso <= 0 || torchOn) return null
+        if (e <= 0 || iso <= 0) return null
         val n = if (fNumber > 0f) fNumber.toDouble() else 1.8
         val t = e / 1e9
         val ev = Math.log(n * n / t) / Math.log(2.0) - Math.log(iso / 100.0) / Math.log(2.0)
@@ -290,7 +283,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     /** Swap NIGHT/DAY (or focus) without reopening the camera: no flicker. */
     fun reconfigure(cfg: Config) {
         config = cfg
-        handler?.post { if (!torchOn) startPreview() }
+        handler?.post { startPreview() }
     }
 
     fun setDrag(on: Boolean) {
@@ -301,20 +294,13 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     fun setEv(ev: Float) {
         val cfg = config ?: return
         config = cfg.copy(ev = ev)
-        handler?.post { if (!torchOn) startPreview() }
+        handler?.post { startPreview() }
     }
 
     private fun startPreview() {
         val s = session ?: return
-        val req = previewRequest(false) ?: return
+        val req = previewRequest() ?: return
         try { s.setRepeatingRequest(req, meter, handler) } catch (_: Throwable) {}
-    }
-
-    private fun setTorch(on: Boolean) {
-        val s = session ?: return
-        val req = previewRequest(on) ?: return
-        torchOn = on
-        try { s.setRepeatingRequest(req, if (on) null else meter, handler) } catch (_: Throwable) {}
     }
 
     // ---------- capture ----------
@@ -331,13 +317,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
             try {
                 when (flash) {
                     Flash.PULSE -> s.capture(pulseRequest(cam, rd), null, h)
-                    Flash.TORCH -> {
-                        setTorch(true)
-                        h.postDelayed({
-                            try { s.capture(autoRequest(cam, rd, torch = true), null, h) } catch (t: Throwable) { fail() }
-                        }, TORCH_SETTLE_MS)
-                    }
-                    Flash.SCREEN, Flash.NONE -> s.capture(autoRequest(cam, rd, torch = false), null, h)
+                    Flash.NONE -> s.capture(autoRequest(cam, rd), null, h)
                 }
             } catch (t: Throwable) {
                 fail()
@@ -397,7 +377,6 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     }
 
     private fun fail() {
-        if (torchOn) setTorch(false)
         val cb = pending
         pending = null
         cb?.invoke(null)
@@ -407,7 +386,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
     /** For capture requests: freeze focus where the live AF already is (no AF cycle), and minimal phone processing. */
     private fun captureTweaks(b: CaptureRequest.Builder) {
         val cfg = config ?: return
-        if (!cfg.pm && !isFront && cfg.autoFocus && minFocus > 0f) {
+        if (!cfg.pm && cfg.autoFocus && minFocus > 0f) {
             // AF found the subject: freeze it there. Too dark to find it: fixed 4 ft like a disposable.
             val d = if (afLocked && lastDiopters > 0f) lastDiopters else min(1f / FALLBACK_M, minFocus)
             b.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_OFF)
@@ -462,14 +441,14 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         return b.build()
     }
 
-    private fun autoRequest(cam: CameraDevice, rd: ImageReader, torch: Boolean): CaptureRequest {
+    private fun autoRequest(cam: CameraDevice, rd: ImageReader): CaptureRequest {
         val b = cam.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
         b.addTarget(rd.surface)
         lastExpNs = meteredExposure; lastIso = meteredIso  // auto exposure: closest reading we have
         applyCommon(b)
         captureTweaks(b)
         b.set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
-        b.set(CaptureRequest.FLASH_MODE, if (torch) CameraMetadata.FLASH_MODE_TORCH else CameraMetadata.FLASH_MODE_OFF)
+        b.set(CaptureRequest.FLASH_MODE, CameraMetadata.FLASH_MODE_OFF)
         b.set(CaptureRequest.JPEG_QUALITY, 95.toByte())
         return b.build()
     }

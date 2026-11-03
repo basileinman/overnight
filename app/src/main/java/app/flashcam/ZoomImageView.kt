@@ -19,6 +19,7 @@ class ZoomImageView(ctx: Context) : ImageView(ctx) {
     var onSwipe: ((dir: Int) -> Unit)? = null   // -1 = swipe left, +1 = swipe right
     /** Hold then slide: phase 0 = start, 1 = moving (dy px, up = positive), 2 = released. */
     var onHoldDrag: ((phase: Int, dy: Float) -> Unit)? = null
+    var onTap: (() -> Unit)? = null   // single tap (after double-tap is ruled out)
     private var holding = false
     private var holdDownX = 0f
     private var holdDownY = 0f
@@ -61,6 +62,10 @@ class ZoomImageView(ctx: Context) : ImageView(ctx) {
             m.postTranslate(-dx, -dy)
             clampAndApply()
             return true
+        }
+
+        override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+            onTap?.invoke(); return onTap != null
         }
 
         override fun onDoubleTap(e: MotionEvent): Boolean {

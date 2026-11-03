@@ -113,6 +113,7 @@ class ViewerActivity : ComponentActivity() {
         right.addView(infoBtn); right.addView(edit)
         top.addView(right, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        topBar = top
 
         // bottom: SHARE   ♥   DELETE   (+ LOOP for bursts)
         val bottomCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL }
@@ -158,6 +159,7 @@ class ViewerActivity : ComponentActivity() {
         bottomCol.addView(loopBtn)
         bottomCol.addView(bottom, LinearLayout.LayoutParams(-1, -2))
         root.addView(bottomCol, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        bottomBar = bottomCol
 
         setContentView(root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
@@ -205,6 +207,20 @@ class ViewerActivity : ComponentActivity() {
     private fun currentImage(): ZoomImageView? {
         val rv = pager.getChildAt(0) as? RecyclerView ?: return null
         return (rv.findViewHolderForAdapterPosition(pager.currentItem) as? PageHolder)?.img
+    }
+
+    private var topBar: View? = null
+    private var bottomBar: View? = null
+    private var chromeHidden = false
+
+    /** Tap the photo to hide or show all the buttons. */
+    private fun toggleChrome() {
+        chromeHidden = !chromeHidden
+        listOfNotNull(topBar, bottomBar).forEach { v ->
+            v.animate().cancel()
+            if (chromeHidden) v.animate().alpha(0f).setDuration(180).withEndAction { v.visibility = View.INVISIBLE }.start()
+            else { v.visibility = View.VISIBLE; v.animate().alpha(1f).setDuration(180).start() }
+        }
     }
 
     private fun updateBars() {
@@ -321,20 +337,17 @@ class ViewerActivity : ComponentActivity() {
         adapter.notifyItemChanged(pager.currentItem)  // restore the still frame
     }
 
-    private fun label(text: String, color: Int) = TextView(this).apply {
-        this.text = text
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-        setTextColor(color)
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        letterSpacing = 0.14f
-    }
+    private fun label(text: String, color: Int) = Ui.text(this, text, Ui.scaled(15f), color)
 
     private inner class PageHolder(val img: ZoomImageView) : RecyclerView.ViewHolder(img)
 
     private inner class PageAdapter : RecyclerView.Adapter<PageHolder>() {
         override fun getItemCount() = photos.size
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageHolder {
-            val v = ZoomImageView(this@ViewerActivity).apply { layoutParams = ViewGroup.LayoutParams(-1, -1) }
+            val v = ZoomImageView(this@ViewerActivity).apply {
+                layoutParams = ViewGroup.LayoutParams(-1, -1)
+                onTap = { toggleChrome() }
+            }
             v.onHoldDrag = { phase, dy -> holdExposure(v, phase, dy) }
             return PageHolder(v)
         }

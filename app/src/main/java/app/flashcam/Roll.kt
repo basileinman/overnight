@@ -9,7 +9,7 @@ import android.os.Build
 import android.provider.MediaStore
 import kotlin.math.max
 
-/** The app's own photo roll: everything saved to Pictures/FlashCam (not the debug originals). */
+/** The app's own photo roll: everything saved to Pictures/Overnight (not the debug originals). */
 object Roll {
 
     data class Photo(val id: Long, val uri: Uri, val number: Int, val name: String) {
@@ -31,12 +31,12 @@ object Roll {
         val args: Array<String>
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             selection = "${MediaStore.Images.Media.RELATIVE_PATH} = ?"
-            args = arrayOf("Pictures/FlashCam/")
+            args = arrayOf(Paths.ROLL_REL)
         } else {
             @Suppress("DEPRECATION")
             val data = MediaStore.Images.Media.DATA
             selection = "$data LIKE ? AND $data NOT LIKE ?"
-            args = arrayOf("%/Pictures/FlashCam/%", "%/Originals/%")
+            args = arrayOf("%/Pictures/Overnight/%", "%/Originals/%")
         }
         val sort = "${MediaStore.Images.Media.DATE_ADDED} ASC, ${MediaStore.Images.Media._ID} ASC"
         val out = ArrayList<Photo>()

@@ -30,7 +30,7 @@ import java.util.concurrent.Executors
 class GalleryActivity : ComponentActivity() {
 
     companion object {
-        const val ORANGE = 0xFFFF7A1F.toInt()
+        const val ORANGE = Ui.ORANGE
         const val EXTRA_FAV_ONLY = "favOnly"
         const val EXTRA_INDEX = "index"
     }
@@ -98,7 +98,14 @@ class GalleryActivity : ComponentActivity() {
         header.addView(tabMain)
         header.addView(tabFav)
         header.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        val gear = ImageView(this).apply {
+            setImageDrawable(Ui.IconDrawable(this@GalleryActivity, Ui.Icon.GEAR, Ui.DIM))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            contentDescription = "Settings"
+            setOnClickListener { Settings.show(this@GalleryActivity) }
+        }
         header.addView(selectBtn)
+        header.addView(gear, LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(10) })
         header.addView(done)
 
         grid = RecyclerView(this).apply {
@@ -192,10 +199,10 @@ class GalleryActivity : ComponentActivity() {
         val out = ArrayList<Item>()
         if (!favOnly) {
             Rolls.active(this)?.let { a ->
-                if (a.used > 0) out.add(Item.Card("IN CAMERA", "${a.used} OF ${a.size} SHOT", a.used, a.size, a.id, true))
+                if (a.used > 0) out.add(Item.Card("IN CAMERA", "${a.used}/${a.size}", a.used, a.size, a.id, true))
             }
             Rolls.lab(this).sortedBy { it.ready }.forEach { r ->
-                out.add(Item.Card("DEVELOPING", Rolls.readyLabel(r.ready), r.used, r.size, r.id, false))
+                out.add(Item.Card("DEVELOPING", "${r.used} FRAMES · " + Rolls.readyLabel(r.ready), r.used, r.size, r.id, false))
             }
         }
         val rollOf = HashMap<String, Rolls.Developed>()
@@ -261,12 +268,23 @@ class GalleryActivity : ComponentActivity() {
 
     private fun selectedPhotos() = shown.filter { it.id in selected }
 
-    private fun label(text: String, sp: Float, color: Int) = TextView(this).apply {
-        this.text = text
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
-        setTextColor(color)
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        letterSpacing = 0.14f
+    private fun label(text: String, sp: Float, color: Int) = Ui.text(this, text, Ui.scaled(sp), color)
+
+    /** Thin film-progress line for the roll strip. */
+    private class ProgressLine(ctx: Context) : View(ctx) {
+        private var frac = 0f; private var active = true
+        private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        fun set(done: Int, total: Int, inCamera: Boolean) {
+            frac = if (total > 0) (done.toFloat() / total).coerceIn(0f, 1f) else 0f
+            active = inCamera; invalidate()
+        }
+        override fun onDraw(c: android.graphics.Canvas) {
+            val r = height / 2f
+            p.color = 0x22FFFFFF
+            c.drawRoundRect(0f, 0f, width.toFloat(), height.toFloat(), r, r, p)
+            p.color = if (active) Ui.ORANGE else 0x80FFFFFF.toInt()
+            c.drawRoundRect(0f, 0f, width * frac, height.toFloat(), r, r, p)
+        }
     }
 
     /** ImageView that is always 2:3 tall. */
@@ -312,21 +330,24 @@ class GalleryActivity : ComponentActivity() {
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder {
             if (viewType == 1) {
+                // slim strip: IN CAMERA 12/36 ........ SEND TO LAB, with a thin progress line underneath
                 val box = LinearLayout(this@GalleryActivity).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(18), dp(16), dp(18), dp(16))
-                    background = GradientDrawable().apply { setColor(0xFF141414.toInt()); cornerRadius = dp(10).toFloat(); setStroke(dp(1), 0x33FF7A1F) }
-                    layoutParams = RecyclerView.LayoutParams(-1, -2).apply { setMargins(dp(3), dp(4), dp(3), dp(12)) }
+                    setPadding(dp(14), dp(9), dp(10), dp(9))
+                    background = GradientDrawable().apply { setColor(0xFF111111.toInt()); cornerRadius = dp(8).toFloat() }
+                    layoutParams = RecyclerView.LayoutParams(-1, -2).apply { setMargins(dp(3), dp(2), dp(3), dp(6)) }
                 }
-                val t = label("", 13f, Color.WHITE)
-                val act = label("SEND TO LAB", 13f, ORANGE).apply {
-                    gravity = Gravity.CENTER
-                    setPadding(0, dp(12), 0, dp(12))
-                    background = GradientDrawable().apply { setColor(0x1FFF7A1F); cornerRadius = dp(8).toFloat(); setStroke(dp(1), 0x66FF7A1F) }
+                val row = LinearLayout(this@GalleryActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                val t = Ui.text(this@GalleryActivity, "", Ui.SMALL, Ui.SOFT)
+                val act = Ui.text(this@GalleryActivity, "SEND TO LAB ›", Ui.SMALL, ORANGE).apply {
+                    setPadding(dp(10), dp(6), dp(4), dp(6))
                 }
-                box.addView(t)
-                box.addView(act, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
-                return Holder(box, null, null, null, t, act)
+                row.addView(t, LinearLayout.LayoutParams(0, -2, 1f))
+                row.addView(act)
+                val bar = ProgressLine(this@GalleryActivity)
+                box.addView(row)
+                box.addView(bar, LinearLayout.LayoutParams(-1, dp(2)).apply { topMargin = dp(7); marginEnd = dp(4) })
+                return Holder(box, null, null, bar, t, act)
             }
             if (viewType == 2) {
                 val t = label("", 11f, 0x80FFFFFF.toInt()).apply {
@@ -359,13 +380,11 @@ class GalleryActivity : ComponentActivity() {
         override fun onBindViewHolder(h: Holder, position: Int) {
             when (val it = items[position]) {
                 is Item.Card -> {
-                    val filled = "■".repeat(it.frames.coerceAtMost(36))
-                    val empty = "□".repeat((it.total - it.frames).coerceIn(0, 36))
                     h.text!!.text = android.text.SpannableStringBuilder().apply {
-                        append(it.title, android.text.style.ForegroundColorSpan(ORANGE), 0)
-                        append("   " + it.sub + "\n\n")
-                        append(filled + empty, android.text.style.ForegroundColorSpan(0x66FFFFFF), 0)
+                        append(it.title, android.text.style.ForegroundColorSpan(if (it.inCamera) ORANGE else Ui.SOFT), 0)
+                        append("  ·  " + it.sub, android.text.style.ForegroundColorSpan(Ui.DIM), 0)
                     }
+                    (h.check as ProgressLine).set(it.frames, it.total, it.inCamera)
                     val card = it
                     h.action!!.visibility = if (card.inCamera) View.VISIBLE else View.GONE
                     h.action.setOnClickListener {

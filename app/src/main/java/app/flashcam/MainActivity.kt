@@ -23,7 +23,6 @@ import android.view.ViewConfiguration
 import android.view.OrientationEventListener
 import android.view.TextureView
 import android.view.View
-import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -48,12 +47,12 @@ import kotlin.math.min
 class MainActivity : ComponentActivity() {
 
     companion object {
-        private const val ORANGE = 0xFFFF7A1F.toInt()
-        private const val WHITE = 0xE6FFFFFF.toInt()
+        private const val ORANGE = Ui.ORANGE
+        private const val WHITE = Ui.SOFT
+        private const val HINT_SHOTS = 3   // the TAP ANYWHERE hint disappears after this many shots
         private const val BURST_COUNT = 5
         private const val BURST_INTERVAL_MS = 1000L
         private const val MAX_RAW_EDGE = 2600
-        private const val SCREEN_FLASH_MS = 250L
         private const val MAX_PENDING = 3
         private const val AUTO_MODE_AFTER_MS = 30 * 60 * 1000L
         private const val NIGHT_EV = 6.0   // dimmer than a lamp-lit room -> NIGHT
@@ -63,14 +62,16 @@ class MainActivity : ComponentActivity() {
     private lateinit var root: View
     private lateinit var previewFrame: FrameLayout
     private lateinit var texture: TextureView
-    private lateinit var flashOverlay: View
+    private lateinit var shutterBlink: View
+    private lateinit var hint: TextView
+    private lateinit var toggleLabel: TextView
     private lateinit var counterText: TextView
     private lateinit var statusText: TextView
     private lateinit var modeBtn: TextView
-    private lateinit var focusBtn: TextView
-    private lateinit var flashBtn: TextView
-    private lateinit var burstBtn: TextView
-    private lateinit var blurBtn: TextView
+    private lateinit var burstBtn: ImageView
+    private lateinit var blurBtn: ImageView
+    private lateinit var burstIcon: Ui.IconDrawable
+    private lateinit var blurIcon: Ui.IconDrawable
     private lateinit var flipBtn: TextView   // now the ROLL button
     private lateinit var thumb: ImageView
     private lateinit var focusReadout: TextView
@@ -88,12 +89,12 @@ class MainActivity : ComponentActivity() {
     private val pending = AtomicInteger(0)
 
     private var pmMode = false
-    private var far = false          // fixed FAR (when not AUTO)
+    private var far = false          // locked FAR 6 ft (settings)
     private var autoFocus = true     // AUTO: focus + flash follow subject distance
+    private var autoMode = true      // NIGHT/DAY follows the light (settings)
     private var secureMode = false   // opened from the lock screen
     private var modeLocked = false   // user picked NIGHT/DAY by hand; auto switching paused
     private var darkVotes = 0
-    private var torchFlash = false
     private var burst = false
     private var double = false        // DOUBLE exposure mode (two taps, one frame)
     private var firstExposure: Bitmap? = null
@@ -101,7 +102,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var ghost: ImageView
     private var drag = false       // fake BLUR effect
     private var realDrag = false   // slow shutter + flash
-    private var front = false
     private var debug = false
     private var evAm = 0f
     private var evPm = 0.1f
@@ -130,12 +130,12 @@ class MainActivity : ComponentActivity() {
         root = findViewById(R.id.root)
         previewFrame = findViewById(R.id.previewFrame)
         texture = findViewById(R.id.preview)
-        flashOverlay = findViewById(R.id.flashOverlay)
+        shutterBlink = findViewById(R.id.shutterBlink)
+        hint = findViewById(R.id.hint)
+        toggleLabel = findViewById(R.id.toggleLabel)
         counterText = findViewById(R.id.counter)
         statusText = findViewById(R.id.status)
         modeBtn = findViewById(R.id.modeBtn)
-        focusBtn = findViewById(R.id.focusBtn)
-        flashBtn = findViewById(R.id.flashBtn)
         burstBtn = findViewById(R.id.burstBtn)
         blurBtn = findViewById(R.id.blurBtn)
         flipBtn = findViewById(R.id.flipBtn)
@@ -148,6 +148,8 @@ class MainActivity : ComponentActivity() {
         evTitle = findViewById(R.id.evTitle)
         evValue = findViewById(R.id.evValue)
         thumb.clipToOutline = true
+        burstIcon = Ui.IconDrawable(this, Ui.Icon.SINGLE, Ui.OFF).also { burstBtn.setImageDrawable(it) }
+        blurIcon = Ui.IconDrawable(this, Ui.Icon.NO_EFFECT, Ui.OFF).also { blurBtn.setImageDrawable(it) }
         engine = CameraEngine(this, texture)
 
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
@@ -162,15 +164,12 @@ class MainActivity : ComponentActivity() {
             height = frameW * 3 / 2
         }
 
-        pmMode = SunClock.isDaytime()  // NIGHT/DAY follows the clock on launch
-        far = prefs.getBoolean("far", false)
-        autoFocus = true  // focus is always automatic now (with a fixed 4 ft fallback in the dark)
-        torchFlash = false  // TORCH is only an automatic fallback for phones without PULSE support
+        loadSettings()
+        // NIGHT/DAY follows the clock on launch (the light meter takes over), unless set to manual
+        pmMode = if (autoMode) SunClock.isDaytime() else prefs.getBoolean("pm", false)
         burst = prefs.getBoolean("burst", false)
         double = prefs.getBoolean("double", false) && !burst
         drag = false  // BLUR always starts off
-        front = false  // back camera only
-        debug = prefs.getBoolean("debug", false)
         evAm = prefs.getFloat("evAm", 0f)
         evPm = prefs.getFloat("evPm2", 0.1f)
         refreshUi()
@@ -178,19 +177,9 @@ class MainActivity : ComponentActivity() {
         setupViewfinderTouch()
         modeBtn.setOnClickListener { if (!busy) { pmMode = !pmMode; modeLocked = true; save(); refreshUi(); engine.reconfigure(camConfig()) } }
         modeBtn.setOnLongClickListener {
-            modeLocked = false; refreshUi(); toast("NIGHT / DAY back on auto"); true
+            if (!autoMode) { toast("Auto NIGHT / DAY is off in settings"); return@setOnLongClickListener true }
+            modeLocked = false; refreshUi(); flashLabel("NIGHT / DAY · AUTO"); true
         }
-        focusBtn.setOnClickListener {
-            if (busy) return@setOnClickListener
-            // AUTO -> CLOSE -> FAR -> AUTO
-            when {
-                autoFocus -> { autoFocus = false; far = false }
-                !far -> far = true
-                else -> { far = false; autoFocus = true }
-            }
-            save(); refreshUi(); engine.reconfigure(camConfig())
-        }
-        flashBtn.setOnClickListener { torchFlash = !torchFlash; save(); refreshUi() }
         burstBtn.setOnClickListener {
             // SINGLE -> BURST -> DOUBLE -> SINGLE
             when {
@@ -199,6 +188,7 @@ class MainActivity : ComponentActivity() {
                 else -> burst = true
             }
             save(); refreshUi()
+            flashLabel(when { double -> "DOUBLE · TWO TAPS, ONE FRAME"; burst -> "BURST · 5 FRAMES"; else -> "SINGLE" })
         }
         counterText.setOnClickListener { if (firstExposure != null) { cancelDouble(); toast("Double exposure cancelled") } }
         blurBtn.setOnClickListener {
@@ -210,12 +200,11 @@ class MainActivity : ComponentActivity() {
             }
             engine.setDrag(realDrag)
             refreshUi()
+            flashLabel(when { drag -> "BLUR"; realDrag -> "DRAG · SLOW SHUTTER"; else -> "NO EFFECT" })
         }
         flipBtn.setOnClickListener { if (!busy) rollMenu() }
-        flipBtn.setOnLongClickListener { statusText.performLongClick() }
         thumb.setOnLongClickListener {
             if (debug) startActivity(Intent(this, LookLabActivity::class.java))
-            else toast("Look Lab: turn on debug first (hold the roll counter)")
             true
         }
         thumb.setOnClickListener {
@@ -228,11 +217,6 @@ class MainActivity : ComponentActivity() {
             } else startActivity(Intent(this, GalleryActivity::class.java))
         }
         statusText.setOnClickListener { if (!busy) rollMenu() }
-        statusText.setOnLongClickListener {
-            debug = !debug; save(); refreshUi()
-            toast(if (debug) "Debug on: originals saved to FlashCam/Originals" else "Debug off")
-            true
-        }
 
         texture.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) { openCamera() }
@@ -249,6 +233,99 @@ class MainActivity : ComponentActivity() {
         }
 
         if (!hasPerms()) permLauncher.launch(neededPerms())
+        // one-time move of old Pictures/FlashCam photos into Pictures/Overnight
+        processExecutor.execute { try { Paths.migrate(this) } catch (_: Throwable) {} }
+    }
+
+    /** Settings live on the roll page; re-read them whenever the camera comes back. */
+    private fun loadSettings() {
+        val f = Settings.focus(this)
+        autoFocus = f == Settings.Focus.AUTO
+        far = f == Settings.Focus.FAR
+        val wasAuto = autoMode
+        autoMode = Settings.autoMode(this)
+        if (!autoMode) modeLocked = true else if (!wasAuto) modeLocked = false
+        debug = Settings.debug(this)
+    }
+
+    /** Brief label over the viewfinder when a toggle changes. */
+    private val hideLabel = Runnable {
+        toggleLabel.animate().alpha(0f).setDuration(250).withEndAction { toggleLabel.visibility = View.GONE }.start()
+    }
+
+    private fun flashLabel(text: String) {
+        main.removeCallbacks(hideLabel)
+        hint.visibility = View.GONE
+        toggleLabel.animate().cancel()
+        toggleLabel.text = text
+        toggleLabel.visibility = View.VISIBLE
+        toggleLabel.alpha = 1f
+        main.postDelayed(hideLabel, 1100)
+    }
+
+    /** Very soft white blink on the viewfinder as the shot is taken (no sound). */
+    private fun blink() {
+        shutterBlink.animate().cancel()
+        shutterBlink.visibility = View.VISIBLE
+        shutterBlink.alpha = 0.22f
+        shutterBlink.animate().alpha(0f).setDuration(160).withEndAction { shutterBlink.visibility = View.GONE }.start()
+    }
+
+    private fun countShot() {
+        val n = prefs.getInt("shotsTaken", 0) + 1
+        prefs.edit().putInt("shotsTaken", n).apply()
+        if (n >= HINT_SHOTS) hint.animate().alpha(0f).setDuration(400).withEndAction { hint.visibility = View.GONE }.start()
+    }
+
+    // ---------- first launch intro ----------
+
+    private var introView: View? = null
+
+    private fun maybeShowIntro() {
+        if (Settings.introSeen(this) || introView != null || secureMode) return
+        val pages = listOf(
+            "OVERNIGHT" to "A flash camera with a film look. Tap anywhere on the viewfinder to shoot. The flash fires the instant you tap.",
+            "EXPOSURE" to "Hold the viewfinder, then slide up to brighten or down to darken.",
+            "NIGHT / DAY" to "NIGHT uses the flash, DAY doesn't. It switches by itself with the light. Tap it to choose by hand.",
+            "ROLLS" to "Load a roll and your shots stay hidden until it's finished. It develops at 8 AM. Settings are behind the gear on the roll page.",
+        )
+        var page = 0
+        val dp = { v: Int -> Ui.dpi(this, v) }
+        val title = Ui.text(this, "", Ui.TITLE, ORANGE)
+        val body = Ui.body(this, "", 14f, Ui.SOFT).apply { setPadding(0, dp(12), 0, 0) }
+        val dots = Ui.text(this, "", Ui.SMALL, Ui.DIM).apply { setPadding(0, dp(28), 0, 0) }
+        val next = Ui.text(this, "", Ui.BUTTON, ORANGE).apply {
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(14), 0, dp(14))
+            background = Ui.button(this@MainActivity, true)
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(34), 0, dp(34), dp(48))
+            gravity = android.view.Gravity.BOTTOM
+            setBackgroundColor(0xF2000000.toInt())
+            isClickable = true
+            addView(title); addView(body); addView(dots)
+            addView(next, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18) })
+        }
+        fun render() {
+            title.text = pages[page].first
+            body.text = pages[page].second
+            dots.text = pages.indices.joinToString("  ") { if (it == page) "●" else "○" }
+            next.text = if (page == pages.size - 1) "START SHOOTING" else "NEXT"
+        }
+        val advance = {
+            if (page < pages.size - 1) { page++; render() }
+            else {
+                Settings.setIntroSeen(this, true)
+                col.animate().alpha(0f).setDuration(200).withEndAction { (root as FrameLayout).removeView(col); introView = null }.start()
+            }
+        }
+        next.setOnClickListener { advance() }
+        col.setOnClickListener { advance() }
+        render()
+        (root as FrameLayout).addView(col, FrameLayout.LayoutParams(-1, -1))
+        introView = col
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -265,10 +342,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val wasAuto = autoFocus; val wasFar = far
+        loadSettings()
+        if (cameraReady && (wasAuto != autoFocus || wasFar != far)) engine.reconfigure(camConfig())
+        hint.visibility = if (prefs.getInt("shotsTaken", 0) < HINT_SHOTS) View.VISIBLE else View.GONE
+        hint.alpha = 1f
+        refreshUi()
+        maybeShowIntro()
         // Back after a while (or first launch): re-pick NIGHT/DAY from the clock.
         // A manual switch sticks while you keep using the app.
         val away = System.currentTimeMillis() - prefs.getLong("pausedAt", 0L)
-        if (away > AUTO_MODE_AFTER_MS) {
+        if (away > AUTO_MODE_AFTER_MS && autoMode) {
             modeLocked = false
             val day = SunClock.isDaytime()   // first guess; the light meter takes over once the camera is up
             if (day != pmMode) { pmMode = day; refreshUi() }
@@ -294,7 +378,6 @@ class MainActivity : ComponentActivity() {
         orientationListener.disable()
         cameraReady = false
         engine.close()
-        hideScreenFlash()
     }
 
     override fun onDestroy() {
@@ -320,10 +403,7 @@ class MainActivity : ComponentActivity() {
         cameraReady = false
         engine.open(
             camConfig(),
-            onReady = { info ->
-                cameraReady = true
-                if (info.isFront != front) { front = info.isFront; refreshUi() }
-            },
+            onReady = { cameraReady = true },
             onError = { msg -> toast(msg) },
         )
     }
@@ -334,10 +414,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun flashKind(): CameraEngine.Flash = when {
-        engine.isFront -> CameraEngine.Flash.SCREEN
-        pmMode -> CameraEngine.Flash.NONE
-        !engine.hasFlash -> CameraEngine.Flash.NONE
-        torchFlash || !engine.manualSensor -> CameraEngine.Flash.TORCH
+        pmMode || !engine.hasFlash -> CameraEngine.Flash.NONE
         else -> CameraEngine.Flash.PULSE
     }
 
@@ -348,6 +425,7 @@ class MainActivity : ComponentActivity() {
         if (!cameraReady || busy || pending.get() >= MAX_PENDING) return
         busy = true
         texture.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        countShot()
         val roll = Rolls.active(this)
         val n = if (roll != null) Rolls.reserve(this, if (burst) BURST_COUNT else 1) else if (burst) BURST_COUNT else 1
         if (roll != null && n == 0) { busy = false; rollMenu(); return }
@@ -356,7 +434,7 @@ class MainActivity : ComponentActivity() {
         val rollSize = roll?.size ?: 0
         refreshRoll()
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val params = LookSettings.params(this, if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
+        val params = LookSettings.params(this, if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode)
         val stripFrames: MutableList<Bitmap> = Collections.synchronizedList(ArrayList())
         captureNext(0, n, stamp, params, stripFrames, rollId, rollStart, rollSize)
     }
@@ -369,19 +447,18 @@ class MainActivity : ComponentActivity() {
         val started = SystemClock.elapsedRealtime()
         val kind = flashKind()
         val rotation = jpegRotation()
-        val mirror = engine.isFront
 
         val useDrag = realDrag && kind == CameraEngine.Flash.PULSE
-        val take = {
+        blink()
+        run {
             engine.captureFrames(useDrag, kind) { bytes, amb ->
                 val frame = bytes?.let { b ->
-                    val f = decode(b, rotation, mirror)
-                    val a = amb?.let { decode(it, rotation, mirror) }
+                    val f = decode(b, rotation)
+                    val a = amb?.let { decode(it, rotation) }
                     if (f != null && a != null) look.dragComposite(f, a).also { f.recycle(); a.recycle() } else f
                 }
                 val meta = buildMeta(kind, i, n, rollId, rollStart, rollSize)
                 main.post {
-                    if (kind == CameraEngine.Flash.SCREEN) hideScreenFlash()
                     if (frame == null) {
                         toast("Capture failed")
                         endShoot(stamp, n, stripFrames, rollId)
@@ -400,13 +477,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-
-        if (kind == CameraEngine.Flash.SCREEN) {
-            showScreenFlash()
-            main.postDelayed({ take() }, SCREEN_FLASH_MS)
-        } else {
-            take()
-        }
     }
 
     // ---------- double exposure ----------
@@ -421,21 +491,21 @@ class MainActivity : ComponentActivity() {
         if (roll != null && roll.left <= 0) { rollMenu(); return }
         busy = true
         texture.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        if (firstExposure == null) countShot()
         val kind = flashKind()
         val rotation = jpegRotation()
-        val mirror = engine.isFront
         val useDrag = realDrag && kind == CameraEngine.Flash.PULSE
-        val take = {
+        blink()
+        run {
             engine.captureFrames(useDrag, kind) { bytes, amb ->
                 val frame = bytes?.let { b ->
-                    val f = decode(b, rotation, mirror)
-                    val a = amb?.let { decode(it, rotation, mirror) }
+                    val f = decode(b, rotation)
+                    val a = amb?.let { decode(it, rotation) }
                     if (f != null && a != null) look.dragComposite(f, a).also { f.recycle(); a.recycle() } else f
                 }
                 val first = firstExposure == null
                 val meta = if (first) buildMeta(kind, 0, 1, null, 0, 0) else null
                 main.post {
-                    if (kind == CameraEngine.Flash.SCREEN) hideScreenFlash()
                     busy = false
                     if (frame == null) { toast("Capture failed"); return@post }
                     if (first) {
@@ -456,7 +526,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
-        if (kind == CameraEngine.Flash.SCREEN) { showScreenFlash(); main.postDelayed({ take() }, SCREEN_FLASH_MS) } else take()
     }
 
     private fun finishDouble(a: Bitmap, b: Bitmap, meta: org.json.JSONObject?) {
@@ -468,7 +537,7 @@ class MainActivity : ComponentActivity() {
         meta?.put("double", true)
         if (rollId != null) { meta?.put("rollFrame", rollStart); meta?.put("rollSize", roll.size) }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val params = LookSettings.params(this, if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode && !engine.isFront)
+        val params = LookSettings.params(this, if (pmMode) Look.Mode.PM else Look.Mode.AM, drag && !pmMode)
         pending.incrementAndGet()
         processExecutor.execute {
             try {
@@ -493,13 +562,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun jpegRotation(): Int {
-        val dev = deviceOrientation
-        return if (engine.isFront) (engine.sensorOrientation - dev + 360) % 360
-        else (engine.sensorOrientation + dev) % 360
+        return (engine.sensorOrientation + deviceOrientation) % 360
     }
 
     /** Decode the JPEG at a manageable size and turn it upright. */
-    private fun decode(bytes: ByteArray, rotation: Int, mirror: Boolean): Bitmap? = try {
+    private fun decode(bytes: ByteArray, rotation: Int): Bitmap? = try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
@@ -510,7 +577,6 @@ class MainActivity : ComponentActivity() {
             val m = Matrix()
             m.postScale(s, s)
             m.postRotate(rotation.toFloat())
-            if (mirror) m.postScale(-1f, 1f)  // selfies match the viewfinder
             val out = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
             if (out !== bmp) bmp.recycle()
             out
@@ -554,7 +620,7 @@ class MainActivity : ComponentActivity() {
         try {
             if (debug) {
                 val tag = if (params.mode == Look.Mode.PM) "PM" else "AM"
-                saveJpeg(frame, "ORIG_${stamp}_${i + 1}_$tag.jpg", "FlashCam/Originals", 97)
+                saveJpeg(frame, "ORIG_${stamp}_${i + 1}_$tag.jpg", Paths.ORIGINALS, 97)
             }
             val out = look.process(frame, params, System.nanoTime())
             frame.recycle()
@@ -574,7 +640,7 @@ class MainActivity : ComponentActivity() {
 
     // ---------- saving ----------
 
-    private fun saveJpeg(bmp: Bitmap, name: String, folder: String = "FlashCam", quality: Int = 92, meta: org.json.JSONObject? = null): Uri? {
+    private fun saveJpeg(bmp: Bitmap, name: String, folder: String = Paths.ROLL, quality: Int = 92, meta: org.json.JSONObject? = null): Uri? {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, name)
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -608,27 +674,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ---------- screen flash (front camera) ----------
-
-    private fun showScreenFlash() {
-        flashOverlay.visibility = View.VISIBLE
-        val lp = window.attributes
-        lp.screenBrightness = 1f
-        window.attributes = lp
-    }
-
-    private fun hideScreenFlash() {
-        flashOverlay.visibility = View.GONE
-        val lp = window.attributes
-        lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
-        window.attributes = lp
-    }
-
     // ---------- ui state ----------
 
     private fun refreshUi() {
-        val grey = 0x80FFFFFF.toInt()
-        // reference: fixed focus + flash controls. DAY: autofocus, no flash.
         modeBtn.text = if (pmMode) "DAY" else "NIGHT"
         val modeColor = if (pmMode) WHITE else ORANGE
         modeBtn.setTextColor(modeColor)
@@ -642,31 +690,19 @@ class MainActivity : ComponentActivity() {
             modeBtn.text = t
         }
 
-        val fixedFocus = !pmMode && !front
-        focusBtn.text = when { autoFocus -> "AUTO ˅"; far -> "FAR ˅"; else -> "CLOSE ˅" }
-        focusBtn.visibility = View.INVISIBLE  // manual CLOSE/FAR removed; AUTO only
-        focusBtn.isEnabled = false
-        focusBtn.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
         focusReadout.text = focusText()
-        focusReadout.compoundDrawableTintList = ColorStateList.valueOf(ORANGE)
+        val lockedFocus = !pmMode && !autoFocus
+        focusReadout.setTextColor(if (pmMode) Ui.DIM else ORANGE)
+        focusReadout.compoundDrawableTintList = ColorStateList.valueOf(if (pmMode) Ui.DIM else ORANGE)
+        focusReadout.alpha = if (lockedFocus) 0.85f else 1f
 
-        flashBtn.visibility = View.GONE
-        flashBtn.text = if (torchFlash) "TORCH" else "PULSE"
-        flashBtn.setTextColor(if (torchFlash) grey else ORANGE)
-        burstBtn.text = when { double -> "DOUBLE"; burst -> "BURST"; else -> "SINGLE" }
-        burstBtn.setTextColor(if (burst || double) ORANGE else grey)
-        blurBtn.text = if (realDrag) "DRAG" else "BLUR"
-        blurBtn.setTextColor(if (drag || realDrag) ORANGE else grey)
-        blurBtn.visibility = if (pmMode || front) View.GONE else View.VISIBLE
-        val d = resources.displayMetrics.density
-        fun pill(on: Boolean) = android.graphics.drawable.GradientDrawable().apply {
-            cornerRadius = 18 * d
-            setStroke((1 * d).toInt().coerceAtLeast(1), if (on) ORANGE else 0x40FFFFFF)
-            setColor(if (on) 0x14FF7A1F else 0x00000000)
-        }
-        flashBtn.background = pill(!torchFlash)
-        burstBtn.background = pill(burst || double)
-        blurBtn.background = pill(drag || realDrag)
+        burstIcon.icon = when { double -> Ui.Icon.DOUBLE; burst -> Ui.Icon.BURST; else -> Ui.Icon.SINGLE }
+        burstIcon.color = if (burst || double) ORANGE else Ui.OFF
+        burstBtn.invalidate(); burstIcon.invalidateSelf()
+        blurIcon.icon = when { realDrag -> Ui.Icon.DRAG; drag -> Ui.Icon.BLUR; else -> Ui.Icon.NO_EFFECT }
+        blurIcon.color = if (drag || realDrag) ORANGE else Ui.OFF
+        blurBtn.invalidate(); blurIcon.invalidateSelf()
+        blurBtn.visibility = if (pmMode) View.INVISIBLE else View.VISIBLE
         refreshRoll()
     }
 
@@ -760,13 +796,9 @@ class MainActivity : ComponentActivity() {
     private fun save() {
         prefs.edit()
             .putBoolean("pm", pmMode)
-            .putBoolean("far", far)
-            .putBoolean("autoFocus", autoFocus)
             .putBoolean("burst", burst)
             .putBoolean("double", double)
             .putBoolean("drag", drag)
-            .putBoolean("front", front)
-            .putBoolean("debug", debug)
             .putFloat("evAm", evAm)
             .putFloat("evPm2", evPm)
             .apply()
@@ -779,37 +811,35 @@ class MainActivity : ComponentActivity() {
         m.put("time", System.currentTimeMillis())
         m.put("mode", if (pmMode) "DAY" else "NIGHT")
         m.put("focus", when {
-            engine.isFront -> "SELFIE"
             pmMode -> "AUTO"
             autoFocus -> engine.subjectDistanceM()?.let { "AUTO · %.1f FT".format(it * 3.281f) } ?: "AUTO · FIXED 4 FT (DARK)"
             far -> "FAR · 6 FT"
             else -> "CLOSE · 3 FT"
         })
         m.put("flash", kind.name.let { if (it == "NONE") "OFF" else it })
-        m.put("effect", when { realDrag && kind == CameraEngine.Flash.PULSE -> "DRAG"; drag && !pmMode && !engine.isFront -> "BLUR"; else -> "NONE" })
+        m.put("effect", when { realDrag && kind == CameraEngine.Flash.PULSE -> "DRAG"; drag && !pmMode -> "BLUR"; else -> "NONE" })
         m.put("burstOf", n); m.put("burstIdx", i + 1)
         m.put("ev", currentEv().toDouble())
         m.put("expNs", engine.lastExpNs); m.put("iso", engine.lastIso)
         m.put("fNumber", engine.fNumber.toDouble()); m.put("focalMm", engine.focalMm.toDouble()); m.put("focal35", engine.focal35)
-        m.put("camera", if (engine.isFront) "FRONT" else "BACK")
+        m.put("camera", "BACK")
         m.put("phone", Build.MODEL)
         if (rollId != null) { m.put("rollFrame", rollStart + i); m.put("rollSize", rollSize) }
         return m
     }
 
     private fun camConfig() = CameraEngine.Config(
-        front = front, pm = pmMode, far = far, ev = currentEv(), drag = realDrag, autoFocus = autoFocus,
+        pm = pmMode, far = far, ev = currentEv(), drag = realDrag, autoFocus = autoFocus,
     )
 
     private fun focusText(): String = when {
-        front -> "SELFIE"
         pmMode -> "AF"
         autoFocus -> engine.subjectDistanceM()?.let { d ->
             val ft = d * 3.281f
             if (ft >= 10f) "10ft+" else "${Math.round(ft).coerceAtLeast(1)}ft"
         } ?: "~4ft"
-        far -> "6ft"
-        else -> "3ft"
+        far -> "6ft · LOCKED"
+        else -> "3ft · LOCKED"
     }
 
     /**
@@ -820,7 +850,7 @@ class MainActivity : ComponentActivity() {
     private val lightTick = object : Runnable {
         override fun run() {
             if (cameraReady) {
-                if (autoFocus && !pmMode && !front) focusReadout.text = focusText()
+                if (autoFocus && !pmMode) focusReadout.text = focusText()
                 val ev = engine.sceneEv()
                 if (!modeLocked && !busy && ev != null) {
                     val wantNight = ev < NIGHT_EV

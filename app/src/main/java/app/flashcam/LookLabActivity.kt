@@ -143,8 +143,8 @@ class LookLabActivity : ComponentActivity() {
         val out = ArrayList<Orig>()
         val col = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
         val (sel, args) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
-            "${MediaStore.Images.Media.RELATIVE_PATH} = ?" to arrayOf("Pictures/FlashCam/Originals/")
-        else @Suppress("DEPRECATION") ("${MediaStore.Images.Media.DATA} LIKE ?" to arrayOf("%/FlashCam/Originals/%"))
+            "${MediaStore.Images.Media.RELATIVE_PATH} = ?" to arrayOf(Paths.ORIGINALS_REL)
+        else @Suppress("DEPRECATION") ("${MediaStore.Images.Media.DATA} LIKE ?" to arrayOf("%/Overnight/Originals/%"))
         try {
             contentResolver.query(col, arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME), sel, args,
                 "${MediaStore.Images.Media.DATE_ADDED} DESC")?.use { c ->
@@ -284,13 +284,7 @@ class LookLabActivity : ComponentActivity() {
         setOnClickListener { onTap() }
     }
 
-    private fun label(text: String, color: Int, sp: Float) = TextView(this).apply {
-        this.text = text
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
-        setTextColor(color)
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        letterSpacing = 0.1f
-    }
+    private fun label(text: String, color: Int, sp: Float) = Ui.text(this, text, Ui.scaled(sp), color)
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
