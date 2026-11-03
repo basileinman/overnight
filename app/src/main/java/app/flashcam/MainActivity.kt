@@ -364,7 +364,6 @@ class MainActivity : ComponentActivity() {
         }
         main.removeCallbacks(lightTick)
         main.postDelayed(lightTick, 800)
-        orientationListener.enable()
         if (texture.isAvailable) openCamera()
         processExecutor.execute {
             val dev = Rolls.tick(this)
@@ -567,7 +566,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun jpegRotation(): Int {
-        return (engine.sensorOrientation + deviceOrientation) % 360
+        // always portrait, however the phone is tilted (like reference): keeps rolls and burst GIFs consistent
+        return engine.sensorOrientation % 360
     }
 
     /** Decode the JPEG at a manageable size and turn it upright. */
