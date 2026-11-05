@@ -13,7 +13,7 @@ import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * Film flash look, calibrated against reference cam reference shots.
+ * Film flash look, calibrated against reference film-flash shots.
  *
  *  1. crop to 2:3 (35mm frame) and resize
  *  2. slight soften to kill phone over-sharpening
@@ -63,7 +63,7 @@ class Look {
         val contrast: Float = 0f,     // -1 .. +1 on top of the curve
         val fade: Float = 0f,         // 0 .. 0.15 lifted blacks
         val grainSize: Float = 1f,    // 1 fine .. 3 coarse
-        val wbStrength: Float = 1f,   // auto white balance amount: 1 = matches reference, 0 = off
+        val wbStrength: Float = 1f,   // auto white balance amount: 1 = full reference strength, 0 = off
     ) {
         companion object {
             fun forMode(mode: Mode, drag: Boolean) = when (mode) {
@@ -80,14 +80,14 @@ class Look {
 
     private class Lut(val r: FloatArray, val g: FloatArray, val b: FloatArray)
 
-    // NIGHT curves fitted jointly from three exposure-matched pairs (Pixel original -> reference cam shot)
+    // NIGHT curves fitted jointly from three exposure-matched pairs (Pixel original -> reference shot)
     // NIGHT: one tone curve for all channels (matched to reference party shots) + adaptive white balance per photo
     private val nR = FloatArray(256) { N_R[it] / 1000f }; private val nG = FloatArray(256) { N_G[it] / 1000f }; private val nB = FloatArray(256) { N_B[it] / 1000f }
     private val dR = FloatArray(256) { D_R[it] / 1000f }; private val dG = FloatArray(256) { D_G[it] / 1000f }; private val dB = FloatArray(256) { D_B[it] / 1000f }
     private val toLin = FloatArray(256) { i -> val c = i / 255f; if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).pow(2.4f) }
     private fun toSrgb(v: Float): Float { val c = v.coerceIn(0f, 1f); return if (c <= 0.0031308f) c * 12.92f else 1.055f * c.pow(1f / 2.4f) - 0.055f }
 
-    /** Pulls each photo partway toward reference's mildly warm neutral, then applies the NIGHT tone curve. */
+    /** Pulls each photo partway toward a mildly warm neutral, then applies the NIGHT tone curve. */
     private fun nightLut(px: IntArray, p: Params): Lut {
         var sr = 0.0; var sg = 0.0; var sb = 0.0; var n = 0
         var i = 0
@@ -130,7 +130,7 @@ class Look {
         return Lut(ch(tr, gR), ch(tg, gG), ch(tb, gB))
     }
     private val lutPm = buildLut(
-        // DAY: tuned against 7 matched DAY pairs: deep blacks, punchy contrast, yellow-green greys
+        // DAY: tuned against 7 matched daytime pairs: deep blacks, punchy contrast, yellow-green greys
         contrast = 0.95f,
         black = floatArrayOf(0.018f, 0.022f, 0.022f),
         white = floatArrayOf(0.985f, 0.985f, 0.940f),

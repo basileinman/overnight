@@ -23,7 +23,12 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
+      - name: Write signing key from secrets
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
+
       - name: Build release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: gradle assembleRelease --stacktrace --no-daemon
 
       - name: Rename APK

@@ -566,7 +566,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun jpegRotation(): Int {
-        // always portrait, however the phone is tilted (like reference): keeps rolls and burst GIFs consistent
+        // always portrait, however the phone is tilted (like a disposable): keeps rolls and burst GIFs consistent
         return engine.sensorOrientation % 360
     }
 

@@ -16,11 +16,12 @@ android {
     }
 
     signingConfigs {
+        // The signing key is never in the repo: the build workflow writes it from encrypted GitHub secrets.
         create("shared") {
-            storeFile = file("flashcam.keystore")
-            storePassword = "REMOVED"
-            keyAlias = "flashcam"
-            keyPassword = "REMOVED"
+            storeFile = file(System.getenv("KEYSTORE_FILE") ?: "release.keystore")
+            storePassword = System.getenv("KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("KEY_ALIAS") ?: "flashcam"
+            keyPassword = System.getenv("KEYSTORE_PASSWORD")
         }
     }
 

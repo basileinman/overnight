@@ -27,7 +27,7 @@ import kotlin.math.roundToInt
 
 /**
  * Thin Camera2 wrapper built for disposable-camera behaviour:
- *  - reference: fixed focus, fixed exposure, real flash pulse on the capture frame (no pre-flash metering)
+ *  - NIGHT: fixed focus, fixed exposure, real flash pulse on the capture frame (no pre-flash metering)
  *  - DAY: autofocus, auto exposure, no flash
  */
 class CameraEngine(context: Context, private val textureView: TextureView) {
@@ -44,7 +44,7 @@ class CameraEngine(context: Context, private val textureView: TextureView) {
         const val PULSE_EXPOSURE_NS = 12_500_000L   // 1/80 s
         const val PULSE_ISO = 900
         // Metered pulse caps: in dim rooms these stop the background from brightening,
-        // so the flash does the work and the background falls dark (the reference look)
+        // so the flash does the work and the background falls dark (the direct-flash look)
         // v0.10: lowered after close portraits blew out — the flash adds on top of the
         // ambient reading, so dim rooms must not be metered brighter than this
         const val PULSE_MAX_EXPOSURE_NS = 12_500_000L  // 1/80 s
