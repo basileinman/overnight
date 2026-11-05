@@ -11,8 +11,8 @@ android {
         applicationId = "app.flashcam"
         minSdk = 26
         targetSdk = 35
-        versionCode = 36
-        versionName = "0.36"
+        versionCode = 37
+        versionName = "0.37"
     }
 
     signingConfigs {
@@ -20,7 +20,7 @@ android {
         create("shared") {
             storeFile = file(System.getenv("KEYSTORE_FILE") ?: "release.keystore")
             storePassword = System.getenv("KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("KEY_ALIAS") ?: "flashcam"
+            keyAlias = System.getenv("KEY_ALIAS") ?: "overnight"
             keyPassword = System.getenv("KEYSTORE_PASSWORD")
         }
     }

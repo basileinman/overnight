@@ -24,4 +24,4 @@ Settings → Developer → Look Lab exposes the knobs live.
 ## Building
 
 GitHub Actions builds a signed APK on every push to `main` and publishes it under **Releases**.
-The signing key lives in repository secrets (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`), never in the code.
+The signing key lives in repository secrets (`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`), never in the code.
