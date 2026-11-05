@@ -127,6 +127,11 @@ object Settings {
         note("What this phone's camera supports. Send it to me if a friend's phone acts up.")
 
         section("APP")
+        action("PHOTO ACCESS") {
+            d.dismiss()
+            act.startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + act.packageName)))
+        }
+        note("Turn on Photos access if older Overnight photos don't show in the roll.")
         action("SHOW INTRO AGAIN") {
             setIntroSeen(ctx, false); d.dismiss()
             Toast.makeText(ctx, "The intro shows next time you open the camera", Toast.LENGTH_SHORT).show()

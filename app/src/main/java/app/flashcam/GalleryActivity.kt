@@ -66,6 +66,24 @@ class GalleryActivity : ComponentActivity() {
     private lateinit var emptyText: TextView
     private val adapter = Adapter()
 
+    private val photoPerm = if (android.os.Build.VERSION.SDK_INT >= 33) android.Manifest.permission.READ_MEDIA_IMAGES
+        else android.Manifest.permission.READ_EXTERNAL_STORAGE
+    private val photoAccess = registerForActivityResult(ActivityResultContracts.RequestPermission()) { reload() }
+
+    /**
+     * Android only shows an app the photos *this install* saved. After a reinstall, older Overnight photos
+     * need photo access to appear in the roll. Asked once, with an explanation first.
+     */
+    private fun askPhotoAccessOnce() {
+        if (androidx.core.content.ContextCompat.checkSelfPermission(this, photoPerm) == android.content.pm.PackageManager.PERMISSION_GRANTED) return
+        val prefs = getSharedPreferences("flashcam", MODE_PRIVATE)
+        if (prefs.getBoolean("askedPhotoAccess", false)) return
+        prefs.edit().putBoolean("askedPhotoAccess", true).apply()
+        FlashDialog.show(this, "Show all your photos?",
+            "Overnight only reads its own folder (Pictures/Overnight). Allowing photo access lets the roll show photos from before a reinstall.",
+            listOf(FlashDialog.Option("Allow", FlashDialog.Style.PRIMARY) { photoAccess.launch(photoPerm) }), cancel = "NOT NOW")
+    }
+
     private val deletePrompt = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) {
         exitSelect(); reload()
     }
@@ -177,6 +195,7 @@ class GalleryActivity : ComponentActivity() {
         if (resumedOnce) cache.evictAll()  // pick up edits/deletes made in the viewer
         resumedOnce = true
         reload()
+        askPhotoAccessOnce()
     }
 
     override fun onDestroy() {
