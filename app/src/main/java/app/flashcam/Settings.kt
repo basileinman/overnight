@@ -23,7 +23,7 @@ import java.net.URL
 
 /** App settings (stored in the same prefs file the camera always used) and the settings sheet. */
 object Settings {
-    const val REPO = "basileinman/flash-cam"
+    const val REPO = "basileinman/overnight"
     const val RELEASES_URL = "https://github.com/$REPO/releases"
 
     enum class Focus { AUTO, CLOSE, FAR }
