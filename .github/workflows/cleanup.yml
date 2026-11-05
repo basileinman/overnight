@@ -1,0 +1,19 @@
+name: One-time cleanup of old releases
+on: push
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete all old releases and their tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          for id in $(gh api "repos/$REPO/releases?per_page=100" --paginate --jq '.[].id'); do
+            gh api -X DELETE "repos/$REPO/releases/$id"
+          done
+          for t in $(gh api "repos/$REPO/git/matching-refs/tags/build-" --paginate --jq '.[].ref'); do
+            gh api -X DELETE "repos/$REPO/git/$t"
+          done
