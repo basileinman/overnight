@@ -12,6 +12,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -33,7 +34,8 @@ class ViewerActivity : ComponentActivity() {
 
     private lateinit var pager: ViewPager2
     private lateinit var numText: TextView
-    private lateinit var heart: TextView
+    private lateinit var heart: ImageView
+    private lateinit var heartIcon: Ui.IconDrawable
     private lateinit var loopBtn: TextView
     private lateinit var infoBtn: TextView
     private lateinit var infoPanel: LinearLayout
@@ -143,9 +145,10 @@ class ViewerActivity : ComponentActivity() {
         val share = label("SHARE", Color.WHITE).apply {
             setOnClickListener { current()?.let { RollActions.share(this@ViewerActivity, listOf(it.uri)) } }
         }
-        heart = label("♡", Color.WHITE).apply {
-            gravity = Gravity.CENTER
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+        heartIcon = Ui.IconDrawable(this, Ui.Icon.HEART, Color.WHITE)
+        heart = ImageView(this).apply {
+            setImageDrawable(heartIcon)
+            contentDescription = "Favorite"
             setOnClickListener {
                 val p = current() ?: return@setOnClickListener
                 Roll.setFavorite(this@ViewerActivity, p.id, !Roll.isFavorite(this@ViewerActivity, p.id))
@@ -161,7 +164,7 @@ class ViewerActivity : ComponentActivity() {
             }
         }
         bottom.addView(share, LinearLayout.LayoutParams(0, -2, 1f))
-        bottom.addView(heart, LinearLayout.LayoutParams(0, -2, 1f))
+        bottom.addView(heart, LinearLayout.LayoutParams(0, dp(26), 1f))
         bottom.addView(del, LinearLayout.LayoutParams(0, -2, 1f))
         infoPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -227,6 +230,13 @@ class ViewerActivity : ComponentActivity() {
     private var bottomBar: View? = null
     private var chromeHidden = false
 
+    /** With shot info open, a tap anywhere on the photo just closes it. */
+    private fun closeInfo() {
+        showInfo = false
+        getSharedPreferences("flashcam", MODE_PRIVATE).edit().putBoolean("showInfo", false).apply()
+        updateBars()
+    }
+
     /** Tap the photo to hide or show all the buttons. */
     private fun toggleChrome() {
         chromeHidden = !chromeHidden
@@ -241,8 +251,9 @@ class ViewerActivity : ComponentActivity() {
         val p = current() ?: return
         numText.text = "%03d".format(p.number)
         val fav = Roll.isFavorite(this, p.id)
-        heart.text = if (fav) "♥" else "♡"
-        heart.setTextColor(if (fav) ORANGE else Color.WHITE)
+        heartIcon.icon = if (fav) Ui.Icon.HEART_FILLED else Ui.Icon.HEART
+        heartIcon.color = if (fav) ORANGE else Color.WHITE
+        heartIcon.invalidateSelf()
         burstControls?.visibility = if (p.burstKey != null) View.VISIBLE else View.GONE
         loopBtn.text = if (looping) "■ STOP" else "▶ PLAY"
         infoBtn.setTextColor(if (showInfo) ORANGE else Color.WHITE)
@@ -420,7 +431,7 @@ class ViewerActivity : ComponentActivity() {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageHolder {
             val v = ZoomImageView(this@ViewerActivity).apply {
                 layoutParams = ViewGroup.LayoutParams(-1, -1)
-                onTap = { toggleChrome() }
+                onTap = { if (showInfo) closeInfo() else toggleChrome() }
             }
             v.onHoldDrag = { phase, dy -> holdExposure(v, phase, dy) }
             return PageHolder(v)

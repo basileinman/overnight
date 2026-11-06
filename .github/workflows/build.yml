@@ -33,7 +33,7 @@ jobs:
         run: gradle assembleRelease --stacktrace --no-daemon
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk Overnight-v0.38.${{ github.run_number }}.apk
+        run: cp app/build/outputs/apk/release/app-release.apk Overnight-v0.39.${{ github.run_number }}.apk
 
       - uses: actions/upload-artifact@v4
         with:

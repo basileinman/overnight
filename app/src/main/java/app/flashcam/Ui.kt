@@ -78,7 +78,7 @@ object Ui {
 
     // ---------- drawn icons ----------
 
-    enum class Icon { SINGLE, BURST, DOUBLE, NO_EFFECT, BLUR, DRAG, GEAR }
+    enum class Icon { SINGLE, BURST, DOUBLE, NO_EFFECT, BLUR, DRAG, GEAR, HEART, HEART_FILLED }
 
     /** Simple line icons drawn in code (no image files), tinted by [color]. */
     class IconDrawable(private val ctx: Context, var icon: Icon, var color: Int) : Drawable() {
@@ -123,6 +123,21 @@ object Ui {
                     }
                     c.drawPath(path, p)
                     c.drawCircle(cx + 4.5f * u, cy - 2f * u, 3.5f * u, fill)
+                }
+                Icon.HEART, Icon.HEART_FILLED -> {
+                    // same outline for both states, so the size never changes; filled just adds the fill
+                    val h = Path().apply {
+                        moveTo(cx, cy + 8f * u)
+                        cubicTo(cx - 3f * u, cy + 5.5f * u, cx - 9.5f * u, cy + 1f * u, cx - 9.5f * u, cy - 3.5f * u)
+                        cubicTo(cx - 9.5f * u, cy - 7f * u, cx - 6.8f * u, cy - 9f * u, cx - 4.6f * u, cy - 9f * u)
+                        cubicTo(cx - 2.6f * u, cy - 9f * u, cx - 1f * u, cy - 7.8f * u, cx, cy - 6f * u)
+                        cubicTo(cx + 1f * u, cy - 7.8f * u, cx + 2.6f * u, cy - 9f * u, cx + 4.6f * u, cy - 9f * u)
+                        cubicTo(cx + 6.8f * u, cy - 9f * u, cx + 9.5f * u, cy - 7f * u, cx + 9.5f * u, cy - 3.5f * u)
+                        cubicTo(cx + 9.5f * u, cy + 1f * u, cx + 3f * u, cy + 5.5f * u, cx, cy + 8f * u)
+                        close()
+                    }
+                    if (icon == Icon.HEART_FILLED) c.drawPath(h, fill)
+                    c.drawPath(h, p)
                 }
                 Icon.GEAR -> {
                     // one continuous outline: 6 squared teeth on a body, hollow center

@@ -11,8 +11,8 @@ android {
         applicationId = "app.flashcam"
         minSdk = 26
         targetSdk = 35
-        versionCode = 38
-        versionName = "0.38"
+        versionCode = 39
+        versionName = "0.39"
     }
 
     signingConfigs {
