@@ -115,6 +115,9 @@ object Settings {
         section("NIGHT / DAY")
         choices(listOf("AUTO BY LIGHT", "MANUAL"), if (autoMode(ctx)) 0 else 1) { setAutoMode(ctx, it == 0) }
 
+        section("ALBUMS")
+        choices(listOf("STACKS", "FILM STRIPS"), AlbumUi.style(ctx)) { AlbumUi.setStyle(ctx, it); (act as? GalleryActivity)?.refreshAlbums() }
+
         section("ROLL SIZE")
         val sizes = listOf(36, 24, 12)
         choices(sizes.map { "$it" }, sizes.indexOf(rollSize(ctx)).coerceAtLeast(0)) { setRollSize(ctx, sizes[it]) }

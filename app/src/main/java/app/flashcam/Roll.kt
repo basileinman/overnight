@@ -12,7 +12,7 @@ import kotlin.math.max
 /** The app's own photo roll: everything saved to Pictures/Overnight (not the debug originals). */
 object Roll {
 
-    data class Photo(val id: Long, val uri: Uri, val number: Int, val name: String) {
+    data class Photo(val id: Long, val uri: Uri, val number: Int, val name: String, val taken: Long = 0L) {
         /** Burst frames are saved as FLASH_<stamp>_<n>.jpg; returns <stamp> or null. */
         val burstKey: String? get() {
             val m = BURST.matchEntire(name) ?: return null
@@ -26,7 +26,8 @@ object Roll {
     /** Newest first; numbers count up from the first photo ever taken (001, 002, ...). */
     fun load(context: Context): List<Photo> {
         val collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME)
+        val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME,
+            MediaStore.Images.Media.DATE_TAKEN, MediaStore.Images.Media.DATE_ADDED)
         val selection: String
         val args: Array<String>
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -44,11 +45,15 @@ object Roll {
             context.contentResolver.query(collection, projection, selection, args, sort)?.use { c ->
                 val idCol = c.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
                 val nameCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+                val takenCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+                val addedCol = c.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
                 var n = 0
                 while (c.moveToNext()) {
                     n++
                     val id = c.getLong(idCol)
-                    out.add(Photo(id, ContentUris.withAppendedId(collection, id), n, c.getString(nameCol) ?: ""))
+                    // when it was shot: EXIF/MediaStore time, else when it was saved
+                    val t = c.getLong(takenCol).takeIf { it > 0 } ?: (c.getLong(addedCol) * 1000L)
+                    out.add(Photo(id, ContentUris.withAppendedId(collection, id), n, c.getString(nameCol) ?: "", t))
                 }
             }
         } catch (_: Throwable) {

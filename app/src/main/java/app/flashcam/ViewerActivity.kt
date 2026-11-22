@@ -25,6 +25,11 @@ import java.util.concurrent.Executors
 
 /** Full-screen viewer: fluid swipe between frames, pinch-zoom, share / ♥ / delete / edit, burst loop. */
 class ViewerActivity : ComponentActivity() {
+    companion object {
+        /** Show only these photos (an album), in this order. */
+        const val EXTRA_NAMES = "names"
+    }
+
 
     private val ORANGE = GalleryActivity.ORANGE
     private val main = Handler(Looper.getMainLooper())
@@ -206,6 +211,10 @@ class ViewerActivity : ComponentActivity() {
         loader.execute {
             var list = Roll.load(this)
             if (favOnly) { val f = Roll.favorites(this); list = list.filter { it.id in f } }
+            intent.getStringArrayListExtra(EXTRA_NAMES)?.let { names ->
+                val byName = list.associateBy { it.name }
+                list = names.mapNotNull { byName[it] }
+            }
             main.post {
                 photos = list
                 adapter.notifyDataSetChanged()

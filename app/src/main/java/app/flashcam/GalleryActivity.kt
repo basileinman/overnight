@@ -26,7 +26,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.util.concurrent.Executors
 
-/** Film-roll grid: MAIN / ♥ tabs, three across, numbered frames, multi-select to share or delete. */
+/** Photo grid: ALL / ♥ / ALBUMS tabs, three across, numbered frames, multi-select to share or delete. */
 class GalleryActivity : ComponentActivity() {
 
     companion object {
@@ -59,6 +59,13 @@ class GalleryActivity : ComponentActivity() {
     private lateinit var grid: RecyclerView
     private lateinit var tabMain: TextView
     private lateinit var tabFav: TextView
+    private lateinit var tabAlbums: TextView
+    private lateinit var albumsList: RecyclerView
+    private var albumsTab = false
+    private var albums: List<Albums.Album> = emptyList()
+    private var albumStyle = AlbumUi.STYLE_STACKS
+    private val albumsAdapter = AlbumsAdapter()
+    private lateinit var addBtn: TextView
     private lateinit var selectBtn: TextView
     private lateinit var bottomBar: LinearLayout
     private lateinit var shareBtn: TextView
@@ -96,16 +103,20 @@ class GalleryActivity : ComponentActivity() {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        // header: MAIN  ♥            SELECT  DONE
+        // header: ALL  ♥  ALBUMS        SELECT  ⚙  DONE
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(18), dp(16), dp(18), dp(12))
         }
-        tabMain = label("MAIN", 15f, Color.WHITE).apply { setOnClickListener { setTab(false) } }
+        tabMain = label("ALL", 15f, Color.WHITE).apply { setOnClickListener { setTab(false) } }
         tabFav = label("♥", 17f, 0x80FFFFFF.toInt()).apply {
             setPadding(dp(22), 0, dp(8), 0)
             setOnClickListener { setTab(true) }
+        }
+        tabAlbums = label("ALBUMS", 15f, 0x80FFFFFF.toInt()).apply {
+            setPadding(dp(14), 0, dp(8), 0)
+            setOnClickListener { showAlbums() }
         }
         selectBtn = label("SELECT", 14f, Color.WHITE).apply {
             setPadding(dp(12), dp(6), dp(18), dp(6))
@@ -117,6 +128,7 @@ class GalleryActivity : ComponentActivity() {
         }
         header.addView(tabMain)
         header.addView(tabFav)
+        header.addView(tabAlbums)
         header.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         val gear = ImageView(this).apply {
             setImageDrawable(Ui.IconDrawable(this@GalleryActivity, Ui.Icon.GEAR, Ui.DIM))
@@ -146,6 +158,12 @@ class GalleryActivity : ComponentActivity() {
         column.addView(header)
         val body = FrameLayout(this)
         body.addView(grid, FrameLayout.LayoutParams(-1, -1))
+        albumsList = RecyclerView(this).apply {
+            adapter = albumsAdapter
+            clipToPadding = false
+            visibility = View.GONE
+        }
+        body.addView(albumsList, FrameLayout.LayoutParams(-1, -1))
         body.addView(emptyText, FrameLayout.LayoutParams(-1, -1))
         column.addView(body, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(column, FrameLayout.LayoutParams(-1, -1))
@@ -172,8 +190,16 @@ class GalleryActivity : ComponentActivity() {
                     }))
             }
         }
+        val add = label("ADD TO ALBUM", 15f, Color.WHITE).apply {
+            gravity = Gravity.CENTER; setPadding(0, dp(22), 0, dp(22))
+            setOnClickListener {
+                AlbumUi.pickAlbum(this@GalleryActivity, selectedPhotos(), all) { exitSelect() }
+            }
+        }
+        addBtn = add
         shareBtn = share; deleteBtn = del
         bottomBar.addView(share, LinearLayout.LayoutParams(0, -2, 1f))
+        bottomBar.addView(add, LinearLayout.LayoutParams(0, -2, 1.4f))
         bottomBar.addView(del, LinearLayout.LayoutParams(0, -2, 1f))
         root.addView(bottomBar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
 
@@ -183,6 +209,7 @@ class GalleryActivity : ComponentActivity() {
             v.setPadding(0, bars.top, 0, 0)
             bottomBar.setPadding(0, 0, 0, bars.bottom)
             grid.setPadding(dp(12), dp(4), dp(12), dp(24) + bars.bottom)
+            albumsList.setPadding(dp(14), dp(4), dp(14), dp(24) + bars.bottom)
             insets
         }
         updateTabs()
@@ -208,7 +235,8 @@ class GalleryActivity : ComponentActivity() {
             val dev = Rolls.tick(this)
             if (dev.isNotEmpty()) main.post { android.widget.Toast.makeText(this, "Your roll is developed", android.widget.Toast.LENGTH_SHORT).show() }
             val list = Roll.load(this)
-            main.post { all = list; applyFilter() }
+            val al = Albums.build(this, list)
+            main.post { all = list; albums = al; applyFilter(); if (albumsTab) renderAlbums() }
         }
     }
 
@@ -257,7 +285,37 @@ class GalleryActivity : ComponentActivity() {
         adapter.notifyDataSetChanged()
     }
 
+    fun refreshAlbums() { if (albumsTab) renderAlbums() }
+
+    /** ALBUMS tab: stacks (2 across) or film strips (1 across), per Settings. */
+    private fun showAlbums() {
+        if (selecting) exitSelect()
+        albumsTab = true
+        renderAlbums()
+        updateTabs()
+    }
+
+    private fun renderAlbums() {
+        val style = AlbumUi.style(this)
+        if (style != albumStyle || albumsList.layoutManager == null) {
+            albumStyle = style
+            albumsList.layoutManager = GridLayoutManager(this, if (style == AlbumUi.STYLE_STACKS) 2 else 1)
+            albumsList.adapter = albumsAdapter
+        }
+        albumsAdapter.notifyDataSetChanged()
+        grid.visibility = View.GONE
+        albumsList.visibility = View.VISIBLE
+        emptyText.text = "YOUR NIGHTS OUT SHOW UP HERE ON THEIR OWN.\nOR SELECT PHOTOS IN ALL → ADD TO ALBUM."
+        emptyText.visibility = if (albums.isEmpty()) View.VISIBLE else View.GONE
+    }
+
     private fun setTab(fav: Boolean) {
+        if (albumsTab) {
+            albumsTab = false
+            albumsList.visibility = View.GONE
+            grid.visibility = View.VISIBLE
+            if (fav == favOnly) { applyFilter(); updateTabs(); return }
+        }
         if (fav == favOnly) return
         favOnly = fav
         exitSelect()
@@ -266,16 +324,20 @@ class GalleryActivity : ComponentActivity() {
     }
 
     private fun updateTabs() {
-        tabMain.setTextColor(if (!favOnly) Color.WHITE else 0x80FFFFFF.toInt())
-        tabFav.setTextColor(if (favOnly) ORANGE else 0x80FFFFFF.toInt())
-        tabMain.background = if (!favOnly) underline() else null
+        val onAll = !favOnly && !albumsTab
+        tabMain.setTextColor(if (onAll) Color.WHITE else 0x80FFFFFF.toInt())
+        tabFav.setTextColor(if (favOnly && !albumsTab) ORANGE else 0x80FFFFFF.toInt())
+        tabAlbums.setTextColor(if (albumsTab) Color.WHITE else 0x80FFFFFF.toInt())
+        tabMain.background = if (onAll) underline() else null
+        tabAlbums.background = if (albumsTab) underline(dp(14)) else null
+        selectBtn.visibility = if (albumsTab) View.INVISIBLE else View.VISIBLE
     }
 
-    private fun underline() = object : android.graphics.drawable.Drawable() {
+    private fun underline(inset: Int = 0) = object : android.graphics.drawable.Drawable() {
         val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = ORANGE }
         override fun draw(c: android.graphics.Canvas) {
             val b = bounds; val w = dp(22).toFloat(); val h = dp(3).toFloat()
-            c.drawRoundRect(b.left.toFloat(), b.bottom - h, b.left + w, b.bottom.toFloat(), h, h, p)
+            c.drawRoundRect(b.left.toFloat() + inset, b.bottom - h, b.left + inset + w, b.bottom.toFloat(), h, h, p)
         }
         override fun setAlpha(a: Int) {}
         override fun setColorFilter(cf: android.graphics.ColorFilter?) {}
@@ -359,6 +421,23 @@ class GalleryActivity : ComponentActivity() {
     }
 
     /** ImageView that is always 2:3 tall. */
+    private inner class AlbumVH(val tile: AlbumUi.Tile) : RecyclerView.ViewHolder(tile)
+
+    private inner class AlbumsAdapter : RecyclerView.Adapter<AlbumVH>() {
+        override fun getItemCount() = albums.size
+        override fun getItemViewType(position: Int) = albumStyle
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
+            AlbumVH(AlbumUi.Tile(this@GalleryActivity, viewType).apply { layoutParams = RecyclerView.LayoutParams(-1, -2) })
+        override fun onBindViewHolder(h: AlbumVH, position: Int) {
+            val a = albums[position]
+            h.tile.bind(a)
+            h.tile.setOnClickListener {
+                val stack = h.tile.stack
+                if (stack != null) stack.open { AlbumUi.open(this@GalleryActivity, a) } else AlbumUi.open(this@GalleryActivity, a)
+            }
+        }
+    }
+
     private class FrameImage(ctx: Context) : ImageView(ctx) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             val w = MeasureSpec.getSize(widthMeasureSpec)
