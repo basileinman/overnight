@@ -141,6 +141,7 @@ object Settings {
         }
         lateinit var updateRight: TextView
         updateRight = action("CHECK FOR UPDATES") { checkForUpdate(act, updateRight) }
+        choices(listOf("CHECK ON LAUNCH", "OFF"), if (autoUpdateCheck(ctx)) 0 else 1) { setAutoUpdateCheck(ctx, it == 0) }
         col.addView(Ui.text(ctx, "OVERNIGHT · v${versionName(ctx)}", Ui.TINY, Ui.FAINT).apply {
             gravity = Gravity.CENTER; setPadding(0, dp(22), 0, dp(4))
         }, LinearLayout.LayoutParams(-1, -2))
@@ -267,6 +268,58 @@ object Settings {
                             listOf(FlashDialog.Option("Download", FlashDialog.Style.PRIMARY) { open(act, url ?: RELEASES_URL) }))
                     }
                 }
+            }
+        }.start()
+    }
+
+    fun autoUpdateCheck(ctx: Context) = prefs(ctx).getBoolean("autoUpdateCheck", true)
+    fun setAutoUpdateCheck(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("autoUpdateCheck", on).apply()
+
+    private fun parseVer(s: String?) = s?.let { Regex("(\\d+)\\.(\\d+)").find(it) }?.let { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
+
+    /** Newest release on GitHub as (version, apk url), or null if it can't be reached. Blocking. */
+    private fun latestRelease(): Pair<Pair<Int, Int>, String>? = try {
+        val c = URL("https://api.github.com/repos/$REPO/releases/latest").openConnection() as HttpURLConnection
+        c.connectTimeout = 6000; c.readTimeout = 6000
+        c.setRequestProperty("Accept", "application/vnd.github+json")
+        if (c.responseCode != 200) null else {
+            val j = JSONObject(c.inputStream.bufferedReader().use { it.readText() })
+            val assets = j.optJSONArray("assets")
+            var found: Pair<Pair<Int, Int>, String>? = null
+            for (i in 0 until (assets?.length() ?: 0)) {
+                val a = assets!!.getJSONObject(i)
+                val v = parseVer(a.optString("name").takeIf { it.endsWith(".apk") })
+                if (v != null) found = v to a.optString("browser_download_url")
+            }
+            found
+        }
+    } catch (_: Throwable) { null }
+
+    /**
+     * Quiet check when the camera opens: at most once a day, never blocks, and only speaks up
+     * when there's a newer version you haven't skipped. You choose whether to download.
+     */
+    fun checkOnLaunch(act: Activity) {
+        if (!autoUpdateCheck(act)) return
+        val p = prefs(act)
+        val now = System.currentTimeMillis()
+        if (now - p.getLong("lastUpdateCheck", 0L) < 20L * 3600 * 1000) return
+        p.edit().putLong("lastUpdateCheck", now).apply()
+        val main = Handler(Looper.getMainLooper())
+        Thread {
+            val r = latestRelease() ?: return@Thread
+            val (latest, url) = r
+            val mine = parseVer(versionName(act)) ?: return@Thread
+            if (compareValuesBy(latest, mine, { it.first }, { it.second }) <= 0) return@Thread
+            val tag = "${latest.first}.${latest.second}"
+            if (p.getString("skippedVersion", null) == tag) return@Thread
+            main.post {
+                if (act.isFinishing || act.isDestroyed) return@post
+                FlashDialog.show(act, "v$tag is out", "You have v${versionName(act)}. Download the new APK, then open it to update. Your photos and albums stay.",
+                    listOf(
+                        FlashDialog.Option("Download", FlashDialog.Style.PRIMARY) { open(act, url) },
+                        FlashDialog.Option("Skip this version") { p.edit().putString("skippedVersion", tag).apply() },
+                    ), cancel = "LATER")
             }
         }.start()
     }

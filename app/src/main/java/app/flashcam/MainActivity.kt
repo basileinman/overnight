@@ -354,6 +354,7 @@ class MainActivity : ComponentActivity() {
         hint.alpha = 1f
         refreshUi()
         maybeShowIntro()
+        if (introView == null && !secureMode) Settings.checkOnLaunch(this)
         // Back after a while (or first launch): re-pick NIGHT/DAY from the clock.
         // A manual switch sticks while you keep using the app.
         val away = System.currentTimeMillis() - prefs.getLong("pausedAt", 0L)
